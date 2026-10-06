@@ -1,0 +1,40 @@
+name: macOS PoC
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+          components: rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check Apple Silicon target
+        run: cargo check --all-targets --target aarch64-apple-darwin
+      - name: Test Apple Silicon target
+        run: cargo test --target aarch64-apple-darwin
+      - name: Build release binary
+        run: cargo build --release --target aarch64-apple-darwin
+      - name: Package diagnostic app
+        run: |
+          APP="dist/wintab-rs.app"
+          mkdir -p "$APP/Contents/MacOS"
+          cp "target/aarch64-apple-darwin/release/wintab-rs" "$APP/Contents/MacOS/wintab-rs"
+          cp packaging/Info.plist "$APP/Contents/Info.plist"
+          codesign --force --sign - "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/wintab-rs-macos-arm64.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wintab-rs-macos-arm64
+          path: dist/wintab-rs-macos-arm64.zip
+          if-no-files-found: error
