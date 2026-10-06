@@ -111,7 +111,9 @@ mod macos {
         let element = OwnedCf(element);
         let timeout_result = unsafe { AXUIElementSetMessagingTimeout(element.0, 1.0) };
         if timeout_result != K_AX_ERROR_SUCCESS {
-            return Err(format!("Could not set AX timeout (AXError {timeout_result})"));
+            return Err(format!(
+                "Could not set AX timeout (AXError {timeout_result})"
+            ));
         }
 
         let attribute = unsafe {
