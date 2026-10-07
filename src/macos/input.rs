@@ -9,9 +9,44 @@ static RESIDENT_QUIT: AtomicBool = AtomicBool::new(false);
 
 struct ResidentContext {
     tap: CFMachPortRef,
+    source: CFRunLoopSourceRef,
     enabled: bool,
     busy: bool,
     permitted: bool,
+}
+
+fn install_resident_tap(context: &mut ResidentContext) -> bool {
+    if !context.tap.is_null() {
+        unsafe { CGEventTapEnable(context.tap, true) };
+        return true;
+    }
+    let tap = unsafe {
+        CGEventTapCreate(
+            K_CG_SESSION_EVENT_TAP,
+            K_CG_HEAD_INSERT_EVENT_TAP,
+            0,
+            1_u64 << K_CG_EVENT_KEY_DOWN,
+            resident_event,
+            (context as *mut ResidentContext).cast(),
+        )
+    };
+    if tap.is_null() {
+        eprintln!("wintab-rs: event tap creation failed; check Input Monitoring permission");
+        return false;
+    }
+    let source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), tap, 0) };
+    if source.is_null() {
+        unsafe { CFRelease(tap) };
+        eprintln!("wintab-rs: could not create resident event tap run-loop source");
+        return false;
+    }
+    context.tap = tap;
+    context.source = source;
+    unsafe {
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
+        CGEventTapEnable(tap, true);
+    }
+    true
 }
 
 extern "C" fn resident_event(
@@ -57,11 +92,17 @@ extern "C" fn resident_menu_action(action: i32, user_info: *mut c_void) -> i32 {
     let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
     match action {
         0 => {
-            if !context.permitted {
-                return 0;
+            if context.enabled {
+                context.enabled = false;
+                if !context.tap.is_null() {
+                    unsafe { CGEventTapEnable(context.tap, false) };
+                }
+            } else {
+                context.permitted = startup_permissions().is_ok_and(|(ax, input)| ax && input);
+                if context.permitted && install_resident_tap(context) {
+                    context.enabled = true;
+                }
             }
-            context.enabled = !context.enabled;
-            unsafe { CGEventTapEnable(context.tap, context.enabled && !context.busy) };
             context.enabled as i32
         }
         1 => {
@@ -113,45 +154,17 @@ extern "C" fn begin_resident_switch(user_info: *mut c_void, reverse: i32) {
 
 pub fn resident() -> Result<(), String> {
     RESIDENT_QUIT.store(false, Ordering::Relaxed);
+    crate::overlay::status_prepare();
     let (ax, input_monitoring) = startup_permissions()?;
     let mut context = ResidentContext {
         tap: ptr::null_mut(),
+        source: ptr::null_mut(),
         enabled: ax && input_monitoring,
         busy: false,
         permitted: ax && input_monitoring,
     };
-    let mut source = ptr::null_mut();
-    if context.permitted {
-        let mask = 1_u64 << K_CG_EVENT_KEY_DOWN;
-        context.tap = unsafe {
-            CGEventTapCreate(
-                K_CG_SESSION_EVENT_TAP,
-                K_CG_HEAD_INSERT_EVENT_TAP,
-                0,
-                mask,
-                resident_event,
-                (&mut context as *mut ResidentContext).cast(),
-            )
-        };
-        if context.tap.is_null() {
-            context.enabled = false;
-            context.permitted = false;
-            eprintln!("wintab-rs: could not create the Command+Tab event tap");
-        } else {
-            source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), context.tap, 0) };
-            if source.is_null() {
-                unsafe { CFRelease(context.tap) };
-                context.tap = ptr::null_mut();
-                context.enabled = false;
-                context.permitted = false;
-                eprintln!("wintab-rs: could not create resident event tap run-loop source");
-            } else {
-                unsafe {
-                    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
-                    CGEventTapEnable(context.tap, true);
-                }
-            }
-        }
+    if context.permitted && !install_resident_tap(&mut context) {
+        context.enabled = false;
     }
     let ran = crate::overlay::status_run(
         resident_menu_action,
@@ -159,11 +172,11 @@ pub fn resident() -> Result<(), String> {
         context.enabled,
     );
     unsafe {
-        if !source.is_null() {
+        if !context.source.is_null() {
             CGEventTapEnable(context.tap, false);
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), context.source, kCFRunLoopDefaultMode);
             CFMachPortInvalidate(context.tap);
-            CFRelease(source);
+            CFRelease(context.source);
             CFRelease(context.tap);
         }
     }

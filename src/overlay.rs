@@ -11,6 +11,7 @@ unsafe extern "C" {
     fn wintab_overlay_select(selected: isize);
     fn wintab_overlay_hide();
     fn wintab_status_run(action: MenuAction, context: *mut c_void, enabled: c_int) -> i32;
+    fn wintab_status_prepare();
     fn wintab_open_privacy_settings();
     fn wintab_defer_switch(action: DeferredAction, context: *mut c_void, reverse: c_int);
 }
@@ -35,6 +36,10 @@ pub fn hide() {
 
 pub(super) fn status_run(action: MenuAction, context: *mut c_void, enabled: bool) -> bool {
     unsafe { wintab_status_run(action, context, enabled as c_int) != 0 }
+}
+
+pub(super) fn status_prepare() {
+    unsafe { wintab_status_prepare() }
 }
 
 pub(super) fn open_privacy_settings() {

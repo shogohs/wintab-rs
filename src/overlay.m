@@ -18,10 +18,21 @@ static void *wintab_menu_context;
 @implementation WintabMenuTarget
 - (void)toggle:(id)sender {
     NSMenuItem *item = (NSMenuItem *)sender;
+    BOOL was_enabled = item.state == NSControlStateValueOn;
     int enabled = wintab_menu_action(0, wintab_menu_context);
     item.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
     item.title = enabled ? @"一時停止" : @"有効にする";
     wintab_status_item.button.title = enabled ? @"WT" : @"WT⏸";
+    if (!was_enabled && !enabled) {
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"wintab-rsを有効にできませんでした";
+        alert.informativeText = @"アクセシビリティと入力監視の許可を確認し、許可した後にもう一度お試しください。";
+        [alert addButtonWithTitle:@"システム設定を開く"];
+        [alert addButtonWithTitle:@"閉じる"];
+        if ([alert runModal] == NSAlertFirstButtonReturn) {
+            [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.settings.PrivacySecurity"]];
+        }
+    }
 }
 - (void)settings:(id)sender {
     wintab_menu_action(1, wintab_menu_context);
@@ -65,6 +76,11 @@ int wintab_status_run(int (*action)(int, void *), void *context, int enabled) {
         wintab_menu_context = NULL;
         return 1;
     }
+}
+
+void wintab_status_prepare(void) {
+    NSApplication *app = [NSApplication sharedApplication];
+    app.activationPolicy = NSApplicationActivationPolicyAccessory;
 }
 
 void wintab_open_privacy_settings(void) {
