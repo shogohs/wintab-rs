@@ -270,7 +270,11 @@ mod macos {
         {
             return None;
         }
-        Some(unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().into_owned())
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     fn dictionary_value(dictionary: CFTypeRef, key: CFTypeRef) -> Option<CFTypeRef> {
@@ -289,7 +293,11 @@ mod macos {
         }
         let mut result = 0i32;
         let ok = unsafe {
-            CFNumberGetValue(value, K_CFNUMBER_SINT32_TYPE, (&mut result as *mut i32).cast())
+            CFNumberGetValue(
+                value,
+                K_CFNUMBER_SINT32_TYPE,
+                (&mut result as *mut i32).cast(),
+            )
         };
         (ok != 0).then_some(result)
     }
@@ -301,7 +309,9 @@ mod macos {
         keys: (CFStringRef, CFStringRef, CFStringRef),
     ) -> Result<(Vec<OwnerRecord>, usize), String> {
         let info = unsafe { CGWindowListCopyWindowInfo(options, 0) };
-        if info.is_null() { return Err("CGWindowListCopyWindowInfo returned null".into()); }
+        if info.is_null() {
+            return Err("CGWindowListCopyWindowInfo returned null".into());
+        }
         let info = OwnedCf(info);
         if unsafe { CFGetTypeID(info.0) } != unsafe { CFArrayGetTypeID() } {
             return Err("CGWindowListCopyWindowInfo did not return an array".into());
@@ -314,7 +324,10 @@ mod macos {
             let row = unsafe { CFArrayGetValueAtIndex(info.0, index as CFIndex) };
             let pid = dictionary_value(row, keys.0).and_then(number_i32);
             let layer = dictionary_value(row, keys.1).and_then(number_i32);
-            let (Some(pid), Some(layer)) = (pid, layer) else { bad += 1; continue; };
+            let (Some(pid), Some(layer)) = (pid, layer) else {
+                bad += 1;
+                continue;
+            };
             let name = dictionary_value(row, keys.2).and_then(string_value);
             records.push((pid, layer, name));
         }
@@ -324,39 +337,61 @@ mod macos {
     fn candidate_snapshot() -> Result<CandidateSnapshot, String> {
         let exclude = K_CG_WINDOW_LIST_OPTION_EXCLUDE_DESKTOP_ELEMENTS;
         let keys = unsafe { (kCGWindowOwnerPID, kCGWindowLayer, kCGWindowOwnerName) };
-        let (visible, bad_visible) = cg_owner_records(K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY | exclude, keys)?;
+        let (visible, bad_visible) =
+            cg_owner_records(K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY | exclude, keys)?;
         let (all, bad_all) = cg_owner_records(exclude, keys)?;
-        let mut raw: Vec<(i32, i32)> = visible.iter().map(|(pid, layer, _)| (*pid, *layer)).collect();
+        let mut raw: Vec<(i32, i32)> = visible
+            .iter()
+            .map(|(pid, layer, _)| (*pid, *layer))
+            .collect();
         raw.extend(all.iter().map(|(pid, layer, _)| (*pid, *layer)));
         let mut names = Vec::<(i32, String)>::new();
         for (pid, _, name) in visible.iter().chain(all.iter()) {
             if let Some(name) = name {
-                if !names.iter().any(|entry| entry.0 == *pid) { names.push((*pid, name.clone())); }
+                if !names.iter().any(|entry| entry.0 == *pid) {
+                    names.push((*pid, name.clone()));
+                }
             }
         }
         let self_pid = std::process::id() as i32;
         let pids = crate::input::candidate_owner_pids(&raw, self_pid);
         let invalid = raw.iter().filter(|entry| entry.0 <= 0).count();
         let self_windows = raw.iter().filter(|entry| entry.0 == self_pid).count();
-        let layered = raw.iter().filter(|entry| entry.0 > 0 && entry.0 != self_pid && entry.1 != 0).count();
+        let layered = raw
+            .iter()
+            .filter(|entry| entry.0 > 0 && entry.0 != self_pid && entry.1 != 0)
+            .count();
         let mut seen = Vec::new();
-        let duplicates = raw.iter().filter(|entry| {
-            let (pid, layer) = **entry;
-            pid > 0 && pid != self_pid && layer == 0 && {
-                let duplicate = seen.contains(&pid);
-                if !duplicate { seen.push(pid); }
-                duplicate
-            }
-        }).count();
-        if bad_visible + bad_all > 0 { eprintln!("Skipped {} CG window rows with invalid dictionary/PID/layer metadata.", bad_visible + bad_all); }
+        let duplicates = raw
+            .iter()
+            .filter(|entry| {
+                let (pid, layer) = **entry;
+                pid > 0 && pid != self_pid && layer == 0 && {
+                    let duplicate = seen.contains(&pid);
+                    if !duplicate {
+                        seen.push(pid);
+                    }
+                    duplicate
+                }
+            })
+            .count();
+        if bad_visible + bad_all > 0 {
+            eprintln!(
+                "Skipped {} CG window rows with invalid dictionary/PID/layer metadata.",
+                bad_visible + bad_all
+            );
+        }
         println!("CG owner rows: visible {}, all {}, invalid metadata {}; excluded invalid PID: {invalid}, self: {self_windows}, nonzero layer: {layered}, duplicate owners: {duplicates}; unique candidate PIDs: {}.", visible.len(), all.len(), bad_visible + bad_all, pids.len());
         println!("Visible owner order groups apps front-to-back; the supplemental all-windows order is unspecified. Neither order is per-window AX z-order or MRU. CGWindowList can omit apps and Spaces; candidate completeness across apps/Spaces is unverified.");
 
         let mut owners = Vec::new();
         let mut rows = Vec::new();
         for pid in pids {
-            let app_name = names.iter().find(|(known, _)| *known == pid)
-                .map(|(_, name)| name.clone()).unwrap_or_else(|| format!("PID {pid}"));
+            let app_name = names
+                .iter()
+                .find(|(known, _)| *known == pid)
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| format!("PID {pid}"));
             let list = match window_list(pid) {
                 Ok(list) => list,
                 Err(error) => {
@@ -372,30 +407,67 @@ mod macos {
                     continue;
                 }
             };
-            let (mut invalid_element, mut role_skip, mut subrole_skip, mut modal_skip, mut modal_unreadable, mut read_skip) = (0, 0, 0, 0, 0, 0);
+            let (
+                mut invalid_element,
+                mut role_skip,
+                mut subrole_skip,
+                mut modal_skip,
+                mut modal_unreadable,
+                mut read_skip,
+            ) = (0, 0, 0, 0, 0, 0);
             for window_index in 0..count {
                 let window = match window_at(&list, window_index) {
                     Ok(window) => window,
-                    Err(_) => { invalid_element += 1; continue; }
+                    Err(_) => {
+                        invalid_element += 1;
+                        continue;
+                    }
                 };
                 let timeout = unsafe { AXUIElementSetMessagingTimeout(window, 1.0) };
-                if timeout != K_AX_ERROR_SUCCESS { read_skip += 1; continue; }
+                if timeout != K_AX_ERROR_SUCCESS {
+                    read_skip += 1;
+                    continue;
+                }
                 let role = match read_string_attribute(window, c"AXRole") {
                     Ok(role) => role,
-                    Err(_) => { read_skip += 1; continue; }
+                    Err(_) => {
+                        read_skip += 1;
+                        continue;
+                    }
                 };
-                if role != "AXWindow" { role_skip += 1; continue; }
+                if role != "AXWindow" {
+                    role_skip += 1;
+                    continue;
+                }
                 let subrole = match read_string_attribute(window, c"AXSubrole") {
                     Ok(subrole) => subrole,
-                    Err(_) => { read_skip += 1; continue; }
+                    Err(_) => {
+                        read_skip += 1;
+                        continue;
+                    }
                 };
-                if subrole != "AXStandardWindow" { subrole_skip += 1; continue; }
+                if subrole != "AXStandardWindow" {
+                    subrole_skip += 1;
+                    continue;
+                }
                 match read_boolean_attribute(window, c"AXModal") {
                     Ok(false) => {}
-                    Ok(true) => { modal_skip += 1; continue; }
-                    Err(_) => { modal_unreadable += 1; continue; }
+                    Ok(true) => {
+                        modal_skip += 1;
+                        continue;
+                    }
+                    Err(_) => {
+                        modal_unreadable += 1;
+                        continue;
+                    }
                 }
-                rows.push(CandidateRow { owner, window: window_index, pid, app_name: app_name.clone(), title: title(window) });
+                rows.push(CandidateRow {
+                    owner,
+                    window: window_index,
+                    pid,
+                    app_name: app_name.clone(),
+                    title: title(window),
+                });
             }
             println!("{app_name:?} PID {pid}: {} standard windows; skipped invalid elements {invalid_element}, role {role_skip}, subrole {subrole_skip}, modal {modal_skip}, unreadable/unsupported AXModal {modal_unreadable}, other unreadable {read_skip}.", rows.iter().filter(|row| row.owner == owner).count());
             owners.push(list);
@@ -842,20 +914,26 @@ mod macos {
 
     fn focused_candidate(snapshot: &CandidateSnapshot) -> Option<usize> {
         let system = unsafe { AXUIElementCreateSystemWide() };
-        if system.is_null() { return None; }
+        if system.is_null() {
+            return None;
+        }
         let system = OwnedCf(system);
         if unsafe { AXUIElementSetMessagingTimeout(system.0, 1.0) } != K_AX_ERROR_SUCCESS {
             return None;
         }
         let app_attr = cf_string(c"AXFocusedApplication").ok()?;
         let app = copy_attribute(system.0, app_attr.0, "AXFocusedApplication").ok()?;
-        if unsafe { CFGetTypeID(app.0) } != unsafe { AXUIElementGetTypeID() } { return None; }
+        if unsafe { CFGetTypeID(app.0) } != unsafe { AXUIElementGetTypeID() } {
+            return None;
+        }
         if unsafe { AXUIElementSetMessagingTimeout(app.0, 1.0) } != K_AX_ERROR_SUCCESS {
             return None;
         }
         let window_attr = cf_string(c"AXFocusedWindow").ok()?;
         let focused = copy_attribute(app.0, window_attr.0, "AXFocusedWindow").ok()?;
-        if unsafe { CFGetTypeID(focused.0) } != unsafe { AXUIElementGetTypeID() } { return None; }
+        if unsafe { CFGetTypeID(focused.0) } != unsafe { AXUIElementGetTypeID() } {
+            return None;
+        }
         snapshot.rows.iter().position(|row| {
             window_at(&snapshot.owners[row.owner], row.window)
                 .is_ok_and(|window| unsafe { CFEqual(focused.0, window) != 0 })
@@ -865,7 +943,10 @@ mod macos {
     pub fn list_candidates() -> Result<(), String> {
         let snapshot = candidate_snapshot()?;
         for (index, row) in snapshot.rows.iter().enumerate() {
-            println!("{index}: {:?} — {:?} (PID {})", row.app_name, row.title, row.pid);
+            println!(
+                "{index}: {:?} — {:?} (PID {})",
+                row.app_name, row.title, row.pid
+            );
         }
         Ok(())
     }
@@ -901,15 +982,33 @@ mod macos {
                 title: title(window),
             });
         }
-        run_switch(CandidateSnapshot { owners: vec![list], rows }, focused, seconds)
+        run_switch(
+            CandidateSnapshot {
+                owners: vec![list],
+                rows,
+            },
+            focused,
+            seconds,
+        )
     }
 
-    fn run_switch(snapshot: CandidateSnapshot, focused: Option<usize>, seconds: f64) -> Result<(), String> {
+    fn run_switch(
+        snapshot: CandidateSnapshot,
+        focused: Option<usize>,
+        seconds: f64,
+    ) -> Result<(), String> {
         let count = snapshot.rows.len();
-        if count == 0 { return Err("No supported AX standard windows were found; no event tap was installed".into()); }
+        if count == 0 {
+            return Err(
+                "No supported AX standard windows were found; no event tap was installed".into(),
+            );
+        }
         println!("Frozen AX candidate list (indexes can change after AX operations):");
         for (index, row) in snapshot.rows.iter().enumerate() {
-            println!("{index}: {:?} — {:?} (PID {})", row.app_name, row.title, row.pid);
+            println!(
+                "{index}: {:?} — {:?} (PID {})",
+                row.app_name, row.title, row.pid
+            );
         }
         if let Some(index) = focused {
             println!("Initial focus is window {index}; first Tab selects the next window.");
@@ -975,7 +1074,10 @@ mod macos {
         }
         if let Some(index) = selected {
             let row = &snapshot.rows[index];
-            println!("Committing frozen candidate {index}: {:?} — {:?} (PID {})", row.app_name, row.title, row.pid);
+            println!(
+                "Committing frozen candidate {index}: {:?} — {:?} (PID {})",
+                row.app_name, row.title, row.pid
+            );
             raise_from_list(&snapshot.owners[row.owner], row.window)?;
         } else {
             println!("Switch cancelled or expired; no window was raised.");
@@ -1101,11 +1203,15 @@ fn run() -> Result<(), String> {
                 macos::switch_pid(pid, seconds)
             }
             Command::ListCandidates => {
-                if !ax { return Ok(()); }
+                if !ax {
+                    return Ok(());
+                }
                 macos::list_candidates()
             }
             Command::Switch(seconds) => {
-                if !ax || !input_monitoring { return Ok(()); }
+                if !ax || !input_monitoring {
+                    return Ok(());
+                }
                 eprintln!("Candidate discovery uses Core Graphics owner metadata and Accessibility standard windows; it may omit apps or Spaces and does not provide MRU ordering.");
                 macos::switch_global(seconds)
             }
