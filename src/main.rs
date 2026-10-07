@@ -148,8 +148,8 @@ mod macos {
             return Ok((ax, input));
         }
 
-        let path = std::env::current_exe()
-            .map_err(|e| format!("Could not determine app path: {e}"))?;
+        let path =
+            std::env::current_exe().map_err(|e| format!("Could not determine app path: {e}"))?;
         eprintln!(
             "Requesting missing permissions. Executable: {}",
             path.display()
@@ -335,9 +335,7 @@ fn run() -> Result<(), String> {
         let command = match args.as_slice() {
             [] => Command::Status,
             [flag, pid] if flag == "--pid" => {
-                let pid: i32 = pid
-                    .parse()
-                    .map_err(|_| "PID must be a positive integer")?;
+                let pid: i32 = pid.parse().map_err(|_| "PID must be a positive integer")?;
                 if pid <= 0 {
                     return Err("PID must be a positive integer".into());
                 }
