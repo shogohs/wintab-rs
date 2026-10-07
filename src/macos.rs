@@ -147,6 +147,10 @@ pub fn trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
+pub fn permission_status() -> (bool, bool) {
+    (trusted(), unsafe { CGPreflightListenEventAccess() })
+}
+
 fn request_ax() -> Result<(), String> {
     let keys = [unsafe { kAXTrustedCheckOptionPrompt }];
     let values = [unsafe { kCFBooleanTrue }];
@@ -170,8 +174,7 @@ fn request_ax() -> Result<(), String> {
 }
 
 pub fn startup_permissions() -> Result<(bool, bool), String> {
-    let mut ax = trusted();
-    let mut input = unsafe { CGPreflightListenEventAccess() };
+    let (mut ax, mut input) = permission_status();
     if ax && input {
         println!("Accessibility: granted");
         println!("Input Monitoring: granted");
@@ -192,14 +195,13 @@ pub fn startup_permissions() -> Result<(bool, bool), String> {
     if !input {
         unsafe { CGRequestListenEventAccess() };
     }
-    ax = trusted();
-    input = unsafe { CGPreflightListenEventAccess() };
+    (ax, input) = permission_status();
     println!(
         "Accessibility: {}",
         if ax {
             "granted"
         } else {
-            "not granted to this process; permission requested; grant in System Settings, then relaunch"
+            "not granted; grant in System Settings, then recheck"
         }
     );
     println!(
@@ -207,20 +209,22 @@ pub fn startup_permissions() -> Result<(bool, bool), String> {
         if input {
             "granted"
         } else {
-            "not granted to this process; permission requested; grant in System Settings, then relaunch"
+            "not granted; grant in System Settings, then recheck"
         }
     );
     if !ax || !input {
         eprintln!(
-            "If already enabled, remove and re-add this app in System Settings (an updated ad-hoc app identity or launch path can be stale), then relaunch: {}",
+            "If already enabled, remove and re-add this app in System Settings (an updated ad-hoc app identity or launch path can be stale), then recheck: {}",
             path.display()
         );
     }
     Ok((ax, input))
 }
 
+mod diagnostics;
 mod input;
 mod windows;
 
-pub use input::{capture, list_candidates, listen, resident, switch_global, switch_pid};
+pub use diagnostics::{capture, listen};
+pub use input::{list_candidates, resident, switch_global, switch_pid};
 pub use windows::{list_windows, raise_window, windows_count};

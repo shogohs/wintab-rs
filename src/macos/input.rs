@@ -103,7 +103,7 @@ extern "C" fn resident_event(
     }
     context.busy = true;
     unsafe { CGEventTapEnable(context.tap, false) };
-    crate::overlay::defer_switch(begin_resident_switch, user_info, flags & (1 << 17) != 0);
+    crate::ui::defer_switch(begin_resident_switch, user_info, flags & (1 << 17) != 0);
     ptr::null_mut()
 }
 
@@ -120,7 +120,8 @@ extern "C" fn resident_menu_action(action: i32, user_info: *mut c_void) -> i32 {
                     unsafe { CGEventTapEnable(context.tap, false) };
                 }
             } else {
-                context.permitted = startup_permissions().is_ok_and(|(ax, input)| ax && input);
+                let (ax, input) = permission_status();
+                context.permitted = ax && input;
                 if context.permitted {
                     remember_focused_window();
                 }
@@ -131,8 +132,19 @@ extern "C" fn resident_menu_action(action: i32, user_info: *mut c_void) -> i32 {
             context.enabled as i32
         }
         1 => {
-            crate::overlay::open_privacy_settings();
+            crate::ui::open_privacy_settings();
             context.enabled as i32
+        }
+        3 => {
+            let (ax, input) = permission_status();
+            context.permitted = ax && input;
+            if !context.permitted && context.enabled {
+                context.enabled = false;
+                if !context.tap.is_null() {
+                    unsafe { CGEventTapEnable(context.tap, false) };
+                }
+            }
+            ax as i32 | ((input as i32) << 1) | ((context.enabled as i32) << 2)
         }
         2 => {
             RESIDENT_QUIT.store(true, Ordering::Relaxed);
@@ -180,7 +192,7 @@ extern "C" fn begin_resident_switch(user_info: *mut c_void, reverse: i32) {
 
 pub fn resident() -> Result<(), String> {
     RESIDENT_QUIT.store(false, Ordering::Relaxed);
-    crate::overlay::status_prepare();
+    crate::ui::status_prepare();
     let (ax, input_monitoring) = startup_permissions()?;
     if ax {
         remember_focused_window();
@@ -195,10 +207,12 @@ pub fn resident() -> Result<(), String> {
     if context.permitted && !install_resident_tap(&mut context) {
         context.enabled = false;
     }
-    let ran = crate::overlay::status_run(
+    let ran = crate::ui::status_run(
         resident_menu_action,
         (&mut context as *mut ResidentContext).cast(),
         context.enabled,
+        ax,
+        input_monitoring,
     );
     unsafe {
         if !context.source.is_null() {
@@ -216,86 +230,7 @@ pub fn resident() -> Result<(), String> {
     }
 }
 
-#[derive(Default)]
-struct TapStats {
-    command_tab: u32,
-    disabled: bool,
-}
-
-extern "C" fn observe_event(
-    _proxy: CGEventTapProxy,
-    kind: CGEventType,
-    event: CGEventRef,
-    user_info: *mut c_void,
-) -> CGEventRef {
-    if user_info.is_null() {
-        return event;
-    }
-    let stats = unsafe { &mut *user_info.cast::<TapStats>() };
-    if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT || kind == K_CG_EVENT_TAP_DISABLED_BY_USER {
-        stats.disabled = true;
-    } else if kind == K_CG_EVENT_KEY_DOWN && !event.is_null() {
-        let flags = unsafe { CGEventGetFlags(event) };
-        let keycode = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) };
-        if flags & K_CG_EVENT_FLAG_MASK_COMMAND != 0 && keycode == 48 {
-            stats.command_tab = stats.command_tab.saturating_add(1);
-        }
-    }
-    // No event is modified or swallowed; only a count is kept in memory.
-    event
-}
-
-pub fn listen(seconds: f64) -> Result<(), String> {
-    let mask: CGEventMask = 1_u64 << K_CG_EVENT_KEY_DOWN;
-    let mut stats = TapStats::default();
-    let tap = unsafe {
-        CGEventTapCreate(
-            K_CG_SESSION_EVENT_TAP,
-            K_CG_HEAD_INSERT_EVENT_TAP,
-            K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
-            mask,
-            observe_event,
-            (&mut stats as *mut TapStats).cast(),
-        )
-    };
-    if tap.is_null() {
-        return Err(
-            "Could not create listen-only event tap. Check Input Monitoring permission and other event-tap requirements.".into(),
-        );
-    }
-    let source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), tap, 0) };
-    if source.is_null() {
-        unsafe { CFRelease(tap) };
-        return Err("Could not create event tap run-loop source".into());
-    }
-    let started = std::time::Instant::now();
-    let deadline = started + std::time::Duration::from_secs_f64(seconds);
-    unsafe {
-        let current = CFRunLoopGetCurrent();
-        let mode = kCFRunLoopDefaultMode;
-        CFRunLoopAddSource(current, source, mode);
-        CGEventTapEnable(tap, true);
-        while !stats.disabled {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            CFRunLoopRunInMode(mode, remaining.as_secs_f64(), false);
-        }
-        CGEventTapEnable(tap, false);
-        CFRunLoopRemoveSource(current, source, mode);
-        CFMachPortInvalidate(tap);
-        CFRelease(source);
-        CFRelease(tap);
-    }
-    println!("Command+Tab key-downs observed: {}", stats.command_tab);
-    if stats.disabled {
-        return Err("The event tap was disabled during the diagnostic".into());
-    }
-    Ok(())
-}
-
-fn decode_event(kind: CGEventType, event: CGEventRef) -> crate::input::Event {
+pub(super) fn decode_event(kind: CGEventType, event: CGEventRef) -> crate::input::Event {
     if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT || kind == K_CG_EVENT_TAP_DISABLED_BY_USER {
         crate::input::Event::Disabled
     } else if event.is_null() {
@@ -318,74 +253,6 @@ fn decode_event(kind: CGEventType, event: CGEventRef) -> crate::input::Event {
     }
 }
 
-extern "C" fn capture_event(
-    _proxy: CGEventTapProxy,
-    kind: CGEventType,
-    event: CGEventRef,
-    user_info: *mut c_void,
-) -> CGEventRef {
-    if user_info.is_null() {
-        return event;
-    }
-    let state = unsafe { &mut *user_info.cast::<crate::input::CaptureState>() };
-    let output = state.handle(decode_event(kind, event));
-    if output.suppress {
-        ptr::null_mut()
-    } else {
-        event
-    }
-}
-
-pub fn capture(seconds: f64) -> Result<(), String> {
-    let mask = (1_u64 << K_CG_EVENT_KEY_DOWN)
-        | (1_u64 << K_CG_EVENT_KEY_UP)
-        | (1_u64 << K_CG_EVENT_FLAGS_CHANGED);
-    let mut state = crate::input::CaptureState::default();
-    let tap = unsafe {
-        CGEventTapCreate(
-            K_CG_SESSION_EVENT_TAP,
-            K_CG_HEAD_INSERT_EVENT_TAP,
-            0,
-            mask,
-            capture_event,
-            (&mut state as *mut crate::input::CaptureState).cast(),
-        )
-    };
-    if tap.is_null() {
-        return Err("Could not create active event tap; check Input Monitoring permission and event-tap requirements.".into());
-    }
-    let source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), tap, 0) };
-    if source.is_null() {
-        unsafe { CFRelease(tap) };
-        return Err("Could not create active event tap run-loop source".into());
-    }
-    let started = std::time::Instant::now();
-    let deadline = started + std::time::Duration::from_secs_f64(seconds);
-    unsafe {
-        let current = CFRunLoopGetCurrent();
-        let mode = kCFRunLoopDefaultMode;
-        CFRunLoopAddSource(current, source, mode);
-        CGEventTapEnable(tap, true);
-        while state.end != Some(crate::input::End::Disabled) {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            CFRunLoopRunInMode(mode, remaining.as_secs_f64().min(0.1), false);
-        }
-        CGEventTapEnable(tap, false);
-        CFRunLoopRemoveSource(current, source, mode);
-        CFMachPortInvalidate(tap);
-        CFRelease(source);
-        CFRelease(tap);
-    }
-    println!("Capture ended: forward steps {}, reverse steps {}, committed sessions {}, cancelled sessions {}; no window was switched.", state.forward, state.reverse, state.committed, state.cancelled);
-    if state.end == Some(crate::input::End::Disabled) {
-        return Err("The active event tap was disabled; capture state was reset and the tap was not re-enabled.".into());
-    }
-    Ok(())
-}
-
 struct SwitchContext {
     input: crate::input::CaptureState,
     selection: crate::input::Selection,
@@ -401,7 +268,7 @@ extern "C" fn overlay_mouse_action(index: isize, commit: i32, user_info: *mut c_
         return;
     }
     context.selection.select(index as usize);
-    crate::overlay::select(context.selection.selected());
+    crate::ui::select(context.selection.selected());
     if commit != 0 {
         context.selection.finish(crate::input::End::Commit);
     }
@@ -419,7 +286,7 @@ extern "C" fn switch_event(
     let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
     if kind == K_CG_EVENT_LEFT_MOUSE_DOWN {
         if !context.selection.terminal() {
-            match crate::overlay::handle_click() {
+            match crate::ui::handle_click() {
                 -1 => context.selection.cancel(),
                 1 => return ptr::null_mut(),
                 _ => {}
@@ -694,7 +561,7 @@ fn run_switch_session(
         unsafe { CFRelease(tap) };
         return Err("Could not create switch event tap run-loop source".into());
     }
-    if !crate::overlay::show(
+    if !crate::ui::show(
         &label_ptrs,
         &pids,
         context.selection.selected(),
@@ -723,7 +590,7 @@ fn run_switch_session(
                 break;
             }
             CFRunLoopRunInMode(mode, wait.as_secs_f64().min(0.1), false);
-            crate::overlay::select(context.selection.selected());
+            crate::ui::select(context.selection.selected());
         }
         CGEventTapEnable(tap, false);
         CFRunLoopRemoveSource(current, source, mode);
@@ -731,7 +598,7 @@ fn run_switch_session(
         CFRelease(source);
         CFRelease(tap);
     }
-    crate::overlay::hide();
+    crate::ui::hide();
     if RESIDENT_QUIT.load(Ordering::Relaxed)
         || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
     {

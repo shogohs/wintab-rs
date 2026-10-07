@@ -4,7 +4,7 @@ mod input;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-mod overlay;
+mod ui;
 
 fn parse_seconds(raw: &str) -> Result<f64, String> {
     let seconds: f64 = raw
