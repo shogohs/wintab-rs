@@ -190,10 +190,10 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
             [wintab_rows addObject:row];
         }
         wintab_selected_title = [NSTextField labelWithString:@""];
-        wintab_selected_title.frame = NSMakeRect(24, 16, width - 48, 24);
+        wintab_selected_title.frame = NSMakeRect(24, 8, width - 48, 38);
         wintab_selected_title.alignment = NSTextAlignmentCenter;
         wintab_selected_title.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        wintab_selected_title.font = [NSFont systemFontOfSize:13.0];
+        wintab_selected_title.font = [NSFont systemFontOfSize:26.0];
         [content addSubview:wintab_selected_title];
         if (@available(macOS 26.0, *)) {
             NSGlassEffectView *glass = [NSGlassEffectView new];
