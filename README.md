@@ -23,6 +23,8 @@ GitHub Actionsの`macOS app` workflowは、Apple Silicon向けの`.app`を成果
 
 常駐中はNSWorkspaceのアプリ起動・アクティブ化通知と、各アプリのAccessibilityフォーカス変更通知でウィンドウMRUを更新します。履歴はメモリ内のみで、通知を登録できないアプリは操作開始時のFocused Window取得にフォールバックします。権限がない／一時停止中は通知監視を行いません。
 
+Space切り替え通知とイベントタップのタイムアウト時に監視を再有効化します。非公開WindowServer APIは使わないため、macOSの公開AX APIが返さない別Spaceのウィンドウは列挙できず、対象Spaceへの切り替えも保証しません。
+
 ```sh
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --status
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --pid 1234

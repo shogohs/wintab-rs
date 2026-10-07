@@ -20,6 +20,17 @@ struct ResidentContext {
     permitted: bool,
 }
 
+#[no_mangle]
+extern "C" fn wintab_resident_space_changed(user_info: *mut c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
+    if context.enabled && !context.busy && !context.tap.is_null() {
+        unsafe { CGEventTapEnable(context.tap, true) };
+    }
+}
+
 fn install_resident_tap(context: &mut ResidentContext) -> bool {
     if !context.tap.is_null() {
         unsafe { CGEventTapEnable(context.tap, true) };
@@ -64,7 +75,13 @@ extern "C" fn resident_event(
         return event;
     }
     let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
-    if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT || kind == K_CG_EVENT_TAP_DISABLED_BY_USER {
+    if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT {
+        if context.enabled && !context.busy {
+            unsafe { CGEventTapEnable(context.tap, true) };
+        }
+        return event;
+    }
+    if kind == K_CG_EVENT_TAP_DISABLED_BY_USER {
         if !context.busy {
             context.enabled = false;
         }

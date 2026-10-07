@@ -17,6 +17,7 @@ static void (*wintab_mouse_action)(NSInteger, int, void *);
 static void *wintab_mouse_context;
 
 extern void wintab_record_focus(int pid, const void *window);
+extern void wintab_resident_space_changed(void *context);
 
 @interface WintabWindowItem : NSView
 @property(nonatomic) NSInteger index;
@@ -159,7 +160,12 @@ void wintab_focus_tracking_start(void) {
         NSRunningApplication *application = note.userInfo[NSWorkspaceApplicationKey];
         if (application != nil) [wintab_ax_observers removeObjectForKey:@(application.processIdentifier)];
     }];
-    wintab_workspace_observers = [NSMutableArray arrayWithObjects:activation, launch, terminate, nil];
+    id space_change = [center addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification
+                                          object:workspace queue:NSOperationQueue.mainQueue
+                                      usingBlock:^(NSNotification *note) {
+        if (wintab_menu_context != NULL) wintab_resident_space_changed(wintab_menu_context);
+    }];
+    wintab_workspace_observers = [NSMutableArray arrayWithObjects:activation, launch, terminate, space_change, nil];
 }
 
 void wintab_focus_tracking_stop(void) {
