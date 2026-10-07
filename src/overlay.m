@@ -5,7 +5,6 @@
 #import <unistd.h>
 
 static NSPanel *wintab_panel;
-static NSScrollView *wintab_scroll;
 static NSMutableArray<NSView *> *wintab_rows;
 static NSMutableArray<NSString *> *wintab_titles;
 static NSTextField *wintab_selected_title;
@@ -14,8 +13,44 @@ static int (*wintab_menu_action)(int, void *);
 static void *wintab_menu_context;
 static NSMutableDictionary<NSNumber *, id> *wintab_ax_observers;
 static NSMutableArray *wintab_workspace_observers;
+static void (*wintab_mouse_action)(NSInteger, int, void *);
+static void *wintab_mouse_context;
 
 extern void wintab_record_focus(int pid, const void *window);
+
+@interface WintabWindowItem : NSView
+@property(nonatomic) NSInteger index;
+@property(nonatomic, strong) NSImage *icon;
+@end
+
+@implementation WintabWindowItem
+- (void)updateTrackingAreas {
+    for (NSTrackingArea *area in self.trackingAreas) [self removeTrackingArea:area];
+    NSTrackingArea *area = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                        options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect
+                                                          owner:self userInfo:nil];
+    [self addTrackingArea:area];
+    [super updateTrackingAreas];
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    [self.icon drawInRect:NSInsetRect(self.bounds, 4, 4)];
+}
+- (void)mouseEntered:(NSEvent *)event {
+    if (wintab_mouse_action != NULL) wintab_mouse_action(self.index, 0, wintab_mouse_context);
+}
+- (void)mouseMoved:(NSEvent *)event {
+    if (wintab_mouse_action != NULL) wintab_mouse_action(self.index, 0, wintab_mouse_context);
+}
+- (void)mouseDown:(NSEvent *)event {
+    if (wintab_mouse_action != NULL) wintab_mouse_action(self.index, 1, wintab_mouse_context);
+}
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+@end
+
+int wintab_overlay_pointer_inside(void) {
+    return wintab_panel != nil && NSPointInRect([NSEvent mouseLocation], wintab_panel.frame);
+}
 
 @interface WintabAXObserver : NSObject
 {
@@ -219,21 +254,26 @@ static void set_selected_row(NSInteger selected) {
         row.layer.backgroundColor = is_selected ? NSColor.selectedContentBackgroundColor.CGColor : NSColor.clearColor.CGColor;
     }
     if (selected >= 0 && (NSUInteger)selected < wintab_rows.count) {
-        [wintab_scroll.contentView scrollRectToVisible:wintab_rows[(NSUInteger)selected].frame];
         wintab_selected_title.stringValue = wintab_titles[(NSUInteger)selected];
     }
 }
 
-int wintab_overlay_show(const char *const *labels, const int *pids, size_t count, NSInteger selected) {
+int wintab_overlay_show(const char *const *labels, const int *pids, size_t count, NSInteger selected,
+                        void (*action)(NSInteger, int, void *), void *context) {
     @autoreleasepool {
         if (count == 0) return 0;
         [NSApplication sharedApplication];
-        CGFloat item_stride = 80.0;
-        CGFloat width = MIN(MAX((CGFloat)count * item_stride + 40.0, 360.0), 760.0);
-        CGFloat height = 154.0;
-        CGFloat viewport_width = width - 40.0;
-        CGFloat document_width = MAX((CGFloat)count * item_stride, viewport_width);
-        NSRect screen = NSScreen.mainScreen.visibleFrame;
+        wintab_mouse_action = action;
+        wintab_mouse_context = context;
+        const CGFloat icon_size = 94.0;
+        const CGFloat item_spacing = 12.0;
+        NSRect screen = NSScreen.screens.firstObject.visibleFrame;
+        CGFloat max_width = screen.size.width - 32.0;
+        CGFloat width = MIN(MAX(360.0, (CGFloat)count * (icon_size + 20.0) + 40.0), max_width);
+        CGFloat fitted_icon_size = MAX(1.0, MIN(icon_size, (width - 40.0 - (CGFloat)(count - 1) * item_spacing) / (CGFloat)count));
+        CGFloat item_stride = fitted_icon_size + item_spacing;
+        CGFloat row_size = fitted_icon_size + 8.0;
+        CGFloat height = 186.0;
         NSRect frame = NSMakeRect(NSMidX(screen) - width / 2.0,
                                   NSMidY(screen) - height / 2.0,
                                   width,
@@ -244,6 +284,7 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
                                                        defer:NO];
         if (wintab_panel == nil) return 0;
         wintab_panel.level = NSStatusWindowLevel;
+        wintab_panel.acceptsMouseMovedEvents = YES;
         wintab_panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
         wintab_panel.opaque = NO;
         wintab_panel.backgroundColor = [NSColor.windowBackgroundColor colorWithAlphaComponent:0.96];
@@ -253,19 +294,15 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         content.wantsLayer = YES;
         content.layer.cornerRadius = 16.0;
         content.layer.backgroundColor = wintab_panel.backgroundColor.CGColor;
-        wintab_scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, 48, viewport_width, 84)];
-        wintab_scroll.hasHorizontalScroller = document_width > viewport_width;
-        wintab_scroll.hasVerticalScroller = NO;
-        wintab_scroll.autohidesScrollers = YES;
-        wintab_scroll.drawsBackground = NO;
-        NSView *document = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, document_width, 80)];
         wintab_rows = [NSMutableArray arrayWithCapacity:count];
         wintab_titles = [NSMutableArray arrayWithCapacity:count];
         NSMutableDictionary<NSNumber *, NSImage *> *icons = [NSMutableDictionary dictionary];
         for (NSUInteger index = 0; index < count; index++) {
-            NSView *row = [[NSView alloc] initWithFrame:NSMakeRect((CGFloat)index * item_stride + 4.0, 4.0, 72.0, 72.0)];
+            CGFloat x = (width - ((CGFloat)count * item_stride - item_spacing)) / 2.0 + (CGFloat)index * item_stride;
+            WintabWindowItem *row = [[WintabWindowItem alloc] initWithFrame:NSMakeRect(x, 58.0, row_size, row_size)];
             row.wantsLayer = YES;
             row.layer.cornerRadius = 12.0;
+            row.index = (NSInteger)index;
             NSNumber *pid = @(pids[index]);
             NSImage *icon = icons[pid];
             if (icon == nil) {
@@ -273,21 +310,14 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
                 if (icon != nil) icons[pid] = icon;
             }
             if (icon == nil) icon = [NSImage imageNamed:NSImageNameApplicationIcon];
-            if (icon != nil) {
-                NSImageView *imageView = [[NSImageView alloc] initWithFrame:NSMakeRect(4, 4, 64, 64)];
-                imageView.image = icon;
-                imageView.imageScaling = NSImageScaleProportionallyUpOrDown;
-                [row addSubview:imageView];
-            }
+            row.icon = icon;
             NSString *title = [NSString stringWithUTF8String:labels[index]] ?: @"";
             [wintab_titles addObject:title.length == 0 ? @"タイトルなし" : title];
-            [document addSubview:row];
+            [content addSubview:row];
             [wintab_rows addObject:row];
         }
-        wintab_scroll.documentView = document;
-        [content addSubview:wintab_scroll];
         wintab_selected_title = [NSTextField labelWithString:@""];
-        wintab_selected_title.frame = NSMakeRect(24, 14, width - 48, 24);
+        wintab_selected_title.frame = NSMakeRect(24, 16, width - 48, 24);
         wintab_selected_title.alignment = NSTextAlignmentCenter;
         wintab_selected_title.lineBreakMode = NSLineBreakByTruncatingMiddle;
         wintab_selected_title.font = [NSFont systemFontOfSize:13.0];
@@ -310,9 +340,10 @@ void wintab_overlay_hide(void) {
     @autoreleasepool {
         [wintab_panel orderOut:nil];
         wintab_panel = nil;
-        wintab_scroll = nil;
         wintab_rows = nil;
         wintab_titles = nil;
         wintab_selected_title = nil;
+        wintab_mouse_action = NULL;
+        wintab_mouse_context = NULL;
     }
 }

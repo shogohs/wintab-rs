@@ -43,6 +43,10 @@ pub fn mru_order(count: usize, recent: &[usize]) -> Vec<usize> {
     order
 }
 
+pub fn mru_start_index(has_focused_window: bool, has_history: bool) -> Option<usize> {
+    (has_focused_window || has_history).then_some(0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Output {
     pub suppress: bool,
@@ -190,6 +194,12 @@ impl Selection {
         });
     }
 
+    pub fn select(&mut self, index: usize) {
+        if self.end.is_none() && index < self.count {
+            self.cursor = Some(index);
+        }
+    }
+
     pub fn finish(&mut self, end: End) {
         if self.end.is_none() {
             self.end = Some(end);
@@ -322,6 +332,18 @@ mod tests {
     }
 
     #[test]
+    fn pointer_selection_updates_cursor_and_ignores_invalid_or_finished_selection() {
+        let mut selection = Selection::new(3, Some(0)).unwrap();
+        selection.select(2);
+        assert_eq!(selection.selected(), Some(2));
+        selection.select(3);
+        assert_eq!(selection.selected(), Some(2));
+        selection.finish(End::Commit);
+        selection.select(1);
+        assert_eq!(selection.take_commit(), Some(2));
+    }
+
+    #[test]
     fn selection_fallback_and_terminal_states_never_commit() {
         let mut first = Selection::new(3, Some(9)).unwrap();
         first.step(Direction::Forward);
@@ -405,5 +427,8 @@ mod tests {
     #[test]
     fn mru_order_moves_recent_candidates_first_and_keeps_fallback_order() {
         assert_eq!(mru_order(4, &[2, 0, 2, 9]), [2, 0, 1, 3]);
+        assert_eq!(mru_start_index(true, false), Some(0));
+        assert_eq!(mru_start_index(false, true), Some(0));
+        assert_eq!(mru_start_index(false, false), None);
     }
 }

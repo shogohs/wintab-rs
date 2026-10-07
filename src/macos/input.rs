@@ -375,6 +375,21 @@ struct SwitchContext {
     deadline: Option<std::time::Instant>,
 }
 
+extern "C" fn overlay_mouse_action(index: isize, commit: i32, user_info: *mut c_void) {
+    if user_info.is_null() || index < 0 {
+        return;
+    }
+    let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
+    if context.selection.terminal() {
+        return;
+    }
+    context.selection.select(index as usize);
+    crate::overlay::select(context.selection.selected());
+    if commit != 0 {
+        context.selection.finish(crate::input::End::Commit);
+    }
+}
+
 extern "C" fn switch_event(
     _proxy: CGEventTapProxy,
     kind: CGEventType,
@@ -385,6 +400,12 @@ extern "C" fn switch_event(
         return event;
     }
     let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
+    if kind == K_CG_EVENT_LEFT_MOUSE_DOWN {
+        if !context.selection.terminal() && !crate::overlay::pointer_inside() {
+            context.selection.cancel();
+        }
+        return event;
+    }
     let decoded = decode_event(kind, event);
     let output = if decoded == crate::input::Event::Disabled {
         let output = context.input.handle(decoded);
@@ -503,6 +524,10 @@ fn order_candidates(snapshot: &mut CandidateSnapshot, focused: Option<usize>) ->
             })
             .collect::<Vec<_>>()
     });
+    // Some apps expose their focused window to AXFocusedApplication but do not
+    // match that element against AXWindows. Their latest activation is still
+    // at the head of the observed MRU history, so use it as the cursor to skip.
+    let has_history = !recent.is_empty();
     let order = crate::input::mru_order(snapshot.rows.len(), &recent);
     let old_rows = std::mem::take(&mut snapshot.rows);
     snapshot.rows = order.iter().map(|&index| old_rows[index].clone()).collect();
@@ -515,7 +540,7 @@ fn order_candidates(snapshot: &mut CandidateSnapshot, focused: Option<usize>) ->
         }
         *history.borrow_mut() = next;
     });
-    focused.map(|_| 0)
+    crate::input::mru_start_index(focused.is_some(), has_history)
 }
 
 pub fn list_candidates() -> Result<(), String> {
@@ -628,7 +653,8 @@ fn run_switch_session(
     };
     let mask = (1_u64 << K_CG_EVENT_KEY_DOWN)
         | (1_u64 << K_CG_EVENT_KEY_UP)
-        | (1_u64 << K_CG_EVENT_FLAGS_CHANGED);
+        | (1_u64 << K_CG_EVENT_FLAGS_CHANGED)
+        | (1_u64 << K_CG_EVENT_LEFT_MOUSE_DOWN);
     let tap = unsafe {
         CGEventTapCreate(
             K_CG_SESSION_EVENT_TAP,
@@ -647,7 +673,13 @@ fn run_switch_session(
         unsafe { CFRelease(tap) };
         return Err("Could not create switch event tap run-loop source".into());
     }
-    if !crate::overlay::show(&label_ptrs, &pids, context.selection.selected()) {
+    if !crate::overlay::show(
+        &label_ptrs,
+        &pids,
+        context.selection.selected(),
+        overlay_mouse_action,
+        (&mut context as *mut SwitchContext).cast(),
+    ) {
         unsafe {
             CFRelease(source);
             CFRelease(tap);

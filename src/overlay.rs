@@ -5,6 +5,7 @@ use std::{
 
 pub(super) type MenuAction = extern "C" fn(c_int, *mut c_void) -> c_int;
 pub(super) type DeferredAction = extern "C" fn(*mut c_void, c_int);
+pub(super) type MouseAction = extern "C" fn(isize, c_int, *mut c_void);
 
 unsafe extern "C" {
     fn wintab_overlay_show(
@@ -12,7 +13,10 @@ unsafe extern "C" {
         pids: *const i32,
         count: usize,
         selected: isize,
+        action: MouseAction,
+        context: *mut c_void,
     ) -> i32;
+    fn wintab_overlay_pointer_inside() -> i32;
     fn wintab_overlay_select(selected: isize);
     fn wintab_overlay_hide();
     fn wintab_status_run(action: MenuAction, context: *mut c_void, enabled: c_int) -> i32;
@@ -21,15 +25,27 @@ unsafe extern "C" {
     fn wintab_defer_switch(action: DeferredAction, context: *mut c_void, reverse: c_int);
 }
 
-pub fn show(labels: &[*const c_char], pids: &[i32], selected: Option<usize>) -> bool {
+pub fn show(
+    labels: &[*const c_char],
+    pids: &[i32],
+    selected: Option<usize>,
+    action: MouseAction,
+    context: *mut c_void,
+) -> bool {
     unsafe {
         wintab_overlay_show(
             labels.as_ptr(),
             pids.as_ptr(),
             labels.len(),
             selected.map_or(-1, |index| index as isize),
+            action,
+            context,
         ) != 0
     }
+}
+
+pub fn pointer_inside() -> bool {
+    unsafe { wintab_overlay_pointer_inside() != 0 }
 }
 
 pub fn select(selected: Option<usize>) {
