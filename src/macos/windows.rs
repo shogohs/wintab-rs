@@ -100,6 +100,12 @@ fn cg_owner_records(
 }
 
 pub(super) fn candidate_snapshot() -> Result<CandidateSnapshot, String> {
+    candidate_snapshot_until(None)
+}
+
+pub(super) fn candidate_snapshot_until(
+    deadline: Option<std::time::Instant>,
+) -> Result<CandidateSnapshot, String> {
     let exclude = K_CG_WINDOW_LIST_OPTION_EXCLUDE_DESKTOP_ELEMENTS;
     let keys = unsafe { (kCGWindowOwnerPID, kCGWindowLayer, kCGWindowOwnerName) };
     let (visible, bad_visible) =
@@ -152,6 +158,9 @@ pub(super) fn candidate_snapshot() -> Result<CandidateSnapshot, String> {
     let mut owners = Vec::new();
     let mut rows = Vec::new();
     for pid in pids {
+        if deadline.is_some_and(|end| std::time::Instant::now() >= end) {
+            return Err("AX window discovery deadline expired".into());
+        }
         let app_name = names
             .iter()
             .find(|(known, _)| *known == pid)
@@ -183,6 +192,9 @@ pub(super) fn candidate_snapshot() -> Result<CandidateSnapshot, String> {
             mut read_skip,
         ) = (0, 0, 0, 0, 0, 0);
         for window_index in 0..count {
+            if deadline.is_some_and(|end| std::time::Instant::now() >= end) {
+                return Err("AX window discovery deadline expired".into());
+            }
             let window = match window_at(&list, window_index) {
                 Ok(window) => window,
                 Err(_) => {
@@ -190,7 +202,15 @@ pub(super) fn candidate_snapshot() -> Result<CandidateSnapshot, String> {
                     continue;
                 }
             };
-            let timeout = unsafe { AXUIElementSetMessagingTimeout(window, 1.0) };
+            let timeout_seconds = deadline.map_or(1.0_f32, |end| {
+                end.saturating_duration_since(std::time::Instant::now())
+                    .as_secs_f64()
+                    .min(1.0) as f32
+            });
+            if timeout_seconds <= 0.0 {
+                return Err("AX window discovery deadline expired".into());
+            }
+            let timeout = unsafe { AXUIElementSetMessagingTimeout(window, timeout_seconds) };
             if timeout != K_AX_ERROR_SUCCESS {
                 read_skip += 1;
                 continue;

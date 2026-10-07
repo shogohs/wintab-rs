@@ -198,7 +198,60 @@ impl CaptureState {
     }
 
     pub fn has_owned_keys(&self) -> bool {
-        self.owned_tab_down
+        self.owned_tab_down || self.owned_arrow_keys != 0
+    }
+}
+
+pub struct PendingInput {
+    capture: CaptureState,
+    steps: Vec<Direction>,
+}
+
+impl PendingInput {
+    pub fn begin(direction: Direction) -> Self {
+        Self {
+            capture: CaptureState::begin_with_tab_down(),
+            steps: vec![direction],
+        }
+    }
+
+    pub fn handle(&mut self, event: Event) -> Output {
+        let output = if event == Event::Disabled {
+            self.capture.handle(event)
+        } else if self.capture.end.is_some() {
+            self.capture.handle_owned_tail(event)
+        } else {
+            self.capture.handle(event)
+        };
+        if let Some(step) = output.step {
+            self.steps.push(step);
+        }
+        output
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.capture.end == Some(End::Disabled)
+    }
+    pub fn has_owned_keys(&self) -> bool {
+        self.capture.has_owned_keys()
+    }
+    pub fn into_capture(self) -> CaptureState {
+        self.capture
+    }
+
+    pub fn into_session(
+        self,
+        count: usize,
+        focused: Option<usize>,
+    ) -> Option<(CaptureState, Selection)> {
+        let mut selection = Selection::new(count, focused)?;
+        for direction in self.steps {
+            selection.step(direction);
+        }
+        if let Some(end) = self.capture.end {
+            selection.finish(end);
+        }
+        Some((self.capture, selection))
     }
 }
 
@@ -336,6 +389,20 @@ mod tests {
     }
 
     #[test]
+    fn owned_arrow_remains_in_tail_after_command_release() {
+        let mut state = CaptureState::begin_with_tab_down();
+        assert!(state.handle(down(123, CMD, false)).suppress);
+        state.handle(Event::KeyUp { key: 48 });
+        assert_eq!(
+            state.handle(Event::FlagsChanged { flags: 0 }).end,
+            Some(End::Commit)
+        );
+        assert!(state.has_owned_keys());
+        assert!(state.handle_owned_tail(Event::KeyUp { key: 123 }).suppress);
+        assert!(!state.has_owned_keys());
+    }
+
+    #[test]
     fn intercepted_start_tab_waits_for_command_release() {
         let mut state = CaptureState::begin_with_tab_down();
         assert!(state.handle(Event::KeyUp { key: 48 }).suppress);
@@ -343,6 +410,47 @@ mod tests {
             state.handle(Event::FlagsChanged { flags: 0 }).end,
             Some(End::Commit)
         );
+    }
+
+    #[test]
+    fn pending_input_replays_initial_tab_even_after_quick_release() {
+        let mut pending = PendingInput::begin(Direction::Forward);
+        pending.handle(Event::KeyUp { key: 48 });
+        pending.handle(Event::FlagsChanged { flags: 0 });
+        let (capture, selection) = pending.into_session(4, Some(0)).unwrap();
+        assert_eq!(selection.selected(), Some(1));
+        assert_eq!(capture.end, Some(End::Commit));
+        assert!(!capture.has_owned_keys());
+    }
+
+    #[test]
+    fn pending_input_preserves_multiple_tabs_direction_and_cancellation() {
+        let mut pending = PendingInput::begin(Direction::Forward);
+        pending.handle(Event::KeyUp { key: 48 });
+        pending.handle(down(48, CMD | SHIFT, false));
+        pending.handle(down(48, CMD | SHIFT, true));
+        pending.handle(Event::KeyUp { key: 48 });
+        pending.handle(down(48, CMD, false));
+        let (_, selection) = pending.into_session(5, Some(0)).unwrap();
+        assert_eq!(selection.selected(), Some(1));
+
+        let mut cancelled = PendingInput::begin(Direction::Forward);
+        cancelled.handle(down(48, CMD, false));
+        cancelled.handle(Event::KeyUp { key: 48 });
+        cancelled.handle(down(0, 0, false));
+        let (_, mut selection) = cancelled.into_session(5, Some(0)).unwrap();
+        assert_eq!(selection.take_commit(), None);
+    }
+
+    #[test]
+    fn pending_disabled_event_cancels_a_quick_commit() {
+        let mut pending = PendingInput::begin(Direction::Forward);
+        pending.handle(Event::KeyUp { key: 48 });
+        pending.handle(Event::FlagsChanged { flags: 0 });
+        pending.handle(Event::Disabled);
+        let (capture, mut selection) = pending.into_session(3, Some(0)).unwrap();
+        assert_eq!(capture.end, Some(End::Disabled));
+        assert_eq!(selection.take_commit(), None);
     }
 
     #[test]

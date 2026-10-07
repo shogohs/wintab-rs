@@ -1,12 +1,13 @@
 use super::windows::{
-    candidate_snapshot, cf_string, copy_attribute, focused_index, raise_from_list, title,
-    window_at, window_list, CandidateRow, CandidateSnapshot,
+    candidate_snapshot, candidate_snapshot_until, cf_string, copy_attribute, focused_index,
+    raise_from_list, title, window_at, window_list, CandidateRow, CandidateSnapshot,
 };
 use super::*;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static RESIDENT_QUIT: AtomicBool = AtomicBool::new(false);
+static DISCOVERY_RUNNING: AtomicBool = AtomicBool::new(false);
 const MAX_MRU_WINDOWS: usize = 128;
 thread_local! {
     static MRU_WINDOWS: RefCell<Vec<(i32, OwnedCf)>> = const { RefCell::new(Vec::new()) };
@@ -18,7 +19,20 @@ struct ResidentContext {
     enabled: bool,
     busy: bool,
     permitted: bool,
+    pending: Option<PendingSwitch>,
+    tail: Option<crate::input::CaptureState>,
+    active: *mut SwitchContext,
 }
+
+struct PendingSwitch {
+    input: crate::input::PendingInput,
+    deadline: std::time::Instant,
+}
+
+struct SnapshotForMain(CandidateSnapshot, Option<usize>);
+// SAFETY: the worker creates and exclusively owns this CF-backed snapshot, then
+// transfers it once through a channel; no CF object is accessed concurrently.
+unsafe impl Send for SnapshotForMain {}
 
 #[no_mangle]
 extern "C" fn wintab_resident_space_changed(user_info: *mut c_void) {
@@ -41,7 +55,10 @@ fn install_resident_tap(context: &mut ResidentContext) -> bool {
             K_CG_SESSION_EVENT_TAP,
             K_CG_HEAD_INSERT_EVENT_TAP,
             0,
-            1_u64 << K_CG_EVENT_KEY_DOWN,
+            (1_u64 << K_CG_EVENT_KEY_DOWN)
+                | (1_u64 << K_CG_EVENT_KEY_UP)
+                | (1_u64 << K_CG_EVENT_FLAGS_CHANGED)
+                | (1_u64 << K_CG_EVENT_LEFT_MOUSE_DOWN),
             resident_event,
             (context as *mut ResidentContext).cast(),
         )
@@ -74,23 +91,61 @@ extern "C" fn resident_event(
     if user_info.is_null() {
         return event;
     }
+    let active = unsafe { (*user_info.cast::<ResidentContext>()).active };
+    if !active.is_null() {
+        return switch_event(_proxy, kind, event, active.cast());
+    }
     let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
     if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT {
-        if context.enabled && !context.busy {
+        if context.pending.is_some() {
+            if let Some(pending) = context.pending.as_mut() {
+                pending.input.handle(crate::input::Event::Disabled);
+            }
+        }
+        if context.enabled {
             unsafe { CGEventTapEnable(context.tap, true) };
         }
         return event;
     }
     if kind == K_CG_EVENT_TAP_DISABLED_BY_USER {
-        if !context.busy {
-            context.enabled = false;
+        context.enabled = false;
+        if let Some(pending) = context.pending.as_mut() {
+            pending.input.handle(crate::input::Event::Disabled);
         }
         return event;
     }
-    if kind != K_CG_EVENT_KEY_DOWN || event.is_null() {
+    if event.is_null() {
         return event;
     }
-    if !context.enabled || context.busy {
+    let (tail_suppress, clear_tail) = if let Some(tail) = context.tail.as_mut() {
+        let output = tail.handle_owned_tail(decode_event(kind, event));
+        let drained = !tail.has_owned_keys();
+        (output.suppress, drained)
+    } else {
+        (false, false)
+    };
+    if clear_tail {
+        context.tail = None;
+    }
+    if tail_suppress {
+        return ptr::null_mut();
+    }
+    if context.busy {
+        if let Some(pending) = context.pending.as_mut() {
+            let decoded = decode_event(kind, event);
+            let output = pending.input.handle(decoded);
+            return if output.suppress {
+                ptr::null_mut()
+            } else {
+                event
+            };
+        }
+        return event;
+    }
+    if context.tail.is_some() {
+        return event;
+    }
+    if kind != K_CG_EVENT_KEY_DOWN || !context.enabled {
         return event;
     }
     let flags = unsafe { CGEventGetFlags(event) };
@@ -102,7 +157,20 @@ extern "C" fn resident_event(
         return event;
     }
     context.busy = true;
-    unsafe { CGEventTapEnable(context.tap, false) };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let direction = if flags & (1 << 17) != 0 {
+        crate::input::Direction::Reverse
+    } else {
+        crate::input::Direction::Forward
+    };
+    if DISCOVERY_RUNNING.load(Ordering::Acquire) {
+        context.busy = false;
+        return event;
+    }
+    context.pending = Some(PendingSwitch {
+        input: crate::input::PendingInput::begin(direction),
+        deadline,
+    });
     crate::ui::defer_switch(begin_resident_switch, user_info, flags & (1 << 17) != 0);
     ptr::null_mut()
 }
@@ -157,30 +225,102 @@ extern "C" fn resident_menu_action(action: i32, user_info: *mut c_void) -> i32 {
     }
 }
 
-extern "C" fn begin_resident_switch(user_info: *mut c_void, reverse: i32) {
+extern "C" fn begin_resident_switch(user_info: *mut c_void, _reverse: i32) {
     if user_info.is_null() {
         return;
     }
-    let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
-    if context.enabled && context.permitted && !RESIDENT_QUIT.load(Ordering::Relaxed) {
-        let result = candidate_snapshot().and_then(|mut snapshot| {
-            let focused = focused_candidate(&snapshot);
-            let focused = order_candidates(&mut snapshot, focused);
-            run_switch_session(
-                snapshot,
-                focused,
-                Some(10.0),
-                Some(if reverse == 0 {
-                    crate::input::Direction::Forward
+    let (should_run, deadline) = {
+        let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
+        (
+            context.enabled && context.permitted,
+            context.pending.as_ref().map(|p| p.deadline),
+        )
+    };
+    let result = if should_run && !RESIDENT_QUIT.load(Ordering::Relaxed) {
+        if DISCOVERY_RUNNING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            match std::thread::Builder::new()
+                .name("wintab-ax-discovery".into())
+                .spawn(move || {
+                    let result = candidate_snapshot_until(deadline).map(|snapshot| {
+                        let focused = focused_candidate(&snapshot);
+                        SnapshotForMain(snapshot, focused)
+                    });
+                    let _ = sender.send(result);
+                    DISCOVERY_RUNNING.store(false, Ordering::Release);
+                }) {
+                Ok(_worker) => {
+                    let mut result = None;
+                    while deadline.is_some_and(|end| std::time::Instant::now() < end)
+                        && !RESIDENT_QUIT.load(Ordering::Relaxed)
+                    {
+                        if let Ok(value) = receiver.try_recv() {
+                            result = Some(value);
+                            break;
+                        }
+                        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.025, false) };
+                    }
+                    result.unwrap_or_else(|| {
+                        Err("Resident window discovery expired after 10 seconds".into())
+                    })
+                }
+                Err(error) => {
+                    DISCOVERY_RUNNING.store(false, Ordering::Release);
+                    Err(format!("Could not start AX discovery: {error}"))
+                }
+            }
+        } else {
+            Err("Previous resident window discovery is still finishing".into())
+        }
+    } else {
+        Err("Resident switch cancelled".into())
+    };
+
+    let replay = {
+        let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
+        context.pending.take()
+    };
+    let mut replay = replay;
+    match result {
+        Ok(SnapshotForMain(mut snapshot, focused)) => {
+            if let Some(pending) = replay.take() {
+                if pending.deadline > std::time::Instant::now()
+                    && !pending.input.is_disabled()
+                    && !RESIDENT_QUIT.load(Ordering::Relaxed)
+                {
+                    let focused = order_candidates(&mut snapshot, focused);
+                    match run_switch_session(
+                        snapshot,
+                        focused,
+                        None,
+                        Some(pending),
+                        user_info.cast(),
+                    ) {
+                        Ok(()) => {}
+                        Err(error) => eprintln!("wintab-rs: {error}"),
+                    }
                 } else {
-                    crate::input::Direction::Reverse
-                }),
-            )
-        });
-        if let Err(error) = result {
+                    let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
+                    if pending.input.has_owned_keys() {
+                        context.tail = Some(pending.input.into_capture());
+                    }
+                }
+            }
+        }
+        Err(error) => {
             eprintln!("wintab-rs: {error}");
+            if let Some(pending) = replay.take() {
+                let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
+                if pending.input.has_owned_keys() {
+                    context.tail = Some(pending.input.into_capture());
+                }
+            }
         }
     }
+    let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
     context.busy = false;
     unsafe {
         CGEventTapEnable(
@@ -203,6 +343,9 @@ pub fn resident() -> Result<(), String> {
         enabled: ax && input_monitoring,
         busy: false,
         permitted: ax && input_monitoring,
+        pending: None,
+        tail: None,
+        active: ptr::null_mut(),
     };
     if context.permitted && !install_resident_tap(&mut context) {
         context.enabled = false;
@@ -283,10 +426,15 @@ extern "C" fn switch_event(
     if user_info.is_null() {
         return event;
     }
-    let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
     if kind == K_CG_EVENT_LEFT_MOUSE_DOWN {
-        if !context.selection.terminal() {
-            match crate::ui::handle_click() {
+        let active = {
+            let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
+            !context.selection.terminal()
+        };
+        if active {
+            let action = crate::ui::handle_click();
+            let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
+            match action {
                 -1 => context.selection.cancel(),
                 1 => return ptr::null_mut(),
                 _ => {}
@@ -294,6 +442,7 @@ extern "C" fn switch_event(
         }
         return event;
     }
+    let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
     let decoded = decode_event(kind, event);
     let output = if decoded == crate::input::Event::Disabled {
         let output = context.input.handle(decoded);
@@ -487,17 +636,25 @@ fn run_switch(
     focused: Option<usize>,
     seconds: f64,
 ) -> Result<(), String> {
-    run_switch_session(snapshot, focused, Some(seconds), None)
+    run_switch_session(snapshot, focused, Some(seconds), None, ptr::null_mut())
 }
 
 fn run_switch_session(
     snapshot: CandidateSnapshot,
     focused: Option<usize>,
     seconds: Option<f64>,
-    initial: Option<crate::input::Direction>,
+    pending: Option<PendingSwitch>,
+    resident: *mut ResidentContext,
 ) -> Result<(), String> {
     let count = snapshot.rows.len();
     if count == 0 {
+        if let Some(pending) = pending {
+            if !resident.is_null() && pending.input.has_owned_keys() {
+                unsafe {
+                    (*resident).tail = Some(pending.input.into_capture());
+                }
+            }
+        }
         return Err(
             "No supported AX standard windows were found; no event tap was installed".into(),
         );
@@ -524,18 +681,27 @@ fn run_switch_session(
         .collect();
     let label_ptrs: Vec<_> = labels.iter().map(|label| label.as_ptr()).collect();
     let pids: Vec<_> = snapshot.rows.iter().map(|row| row.pid).collect();
-    let deadline = seconds
-        .map(|seconds| std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds));
-    let mut selection = crate::input::Selection::new(count, focused).unwrap();
-    if let Some(direction) = initial {
-        selection.step(direction);
-    }
+    let deadline = pending
+        .as_ref()
+        .map(|pending| pending.deadline)
+        .or_else(|| {
+            seconds.map(|seconds| {
+                std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds)
+            })
+        });
+    let (input, selection) = if let Some(pending) = pending {
+        pending
+            .input
+            .into_session(count, focused)
+            .ok_or("No supported AX standard windows were found")?
+    } else {
+        (
+            crate::input::CaptureState::default(),
+            crate::input::Selection::new(count, focused).unwrap(),
+        )
+    };
     let mut context = SwitchContext {
-        input: if initial.is_some() {
-            crate::input::CaptureState::begin_with_tab_down()
-        } else {
-            crate::input::CaptureState::default()
-        },
+        input,
         selection,
         deadline,
     };
@@ -543,60 +709,129 @@ fn run_switch_session(
         | (1_u64 << K_CG_EVENT_KEY_UP)
         | (1_u64 << K_CG_EVENT_FLAGS_CHANGED)
         | (1_u64 << K_CG_EVENT_LEFT_MOUSE_DOWN);
-    let tap = unsafe {
-        CGEventTapCreate(
-            K_CG_SESSION_EVENT_TAP,
-            K_CG_HEAD_INSERT_EVENT_TAP,
-            0,
-            mask,
-            switch_event,
-            (&mut context as *mut SwitchContext).cast(),
-        )
+    let context_ptr = ptr::addr_of_mut!(context);
+    let resident_mode = !resident.is_null();
+    let tap = if resident_mode {
+        unsafe { (*resident).tap }
+    } else {
+        unsafe {
+            CGEventTapCreate(
+                K_CG_SESSION_EVENT_TAP,
+                K_CG_HEAD_INSERT_EVENT_TAP,
+                0,
+                mask,
+                switch_event,
+                context_ptr.cast(),
+            )
+        }
     };
     if tap.is_null() {
+        if !resident.is_null() && context.input.has_owned_keys() {
+            unsafe {
+                (*resident).tail = Some(std::mem::take(&mut context.input));
+            }
+        }
         return Err("Could not create active event tap; check Input Monitoring permission and event-tap requirements.".into());
     }
-    let source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), tap, 0) };
+    let source = if resident_mode {
+        unsafe { (*resident).source }
+    } else {
+        unsafe { CFMachPortCreateRunLoopSource(ptr::null(), tap, 0) }
+    };
     if source.is_null() {
-        unsafe { CFRelease(tap) };
+        if !resident_mode {
+            unsafe { CFRelease(tap) }
+        }
+        if !resident.is_null() && context.input.has_owned_keys() {
+            unsafe {
+                (*resident).tail = Some(std::mem::take(&mut context.input));
+            }
+        }
         return Err("Could not create switch event tap run-loop source".into());
     }
+    if resident_mode {
+        unsafe {
+            (*resident).active = context_ptr;
+        }
+    }
+    let initial_selected = unsafe { (*context_ptr).selection.selected() };
     if !crate::ui::show(
         &label_ptrs,
         &pids,
-        context.selection.selected(),
+        initial_selected,
         overlay_mouse_action,
-        (&mut context as *mut SwitchContext).cast(),
+        context_ptr.cast(),
     ) {
-        unsafe {
-            CFRelease(source);
-            CFRelease(tap);
+        if resident_mode {
+            unsafe {
+                (*resident).active = ptr::null_mut();
+            }
+        }
+        if !resident_mode {
+            unsafe {
+                CFRelease(source);
+                CFRelease(tap);
+            }
+        }
+        if !resident.is_null() && context.input.has_owned_keys() {
+            unsafe {
+                (*resident).tail = Some(std::mem::take(&mut context.input));
+            }
         }
         return Err("Could not create the window list panel".into());
     }
     unsafe {
         let current = CFRunLoopGetCurrent();
         let mode = kCFRunLoopDefaultMode;
-        CFRunLoopAddSource(current, source, mode);
-        CGEventTapEnable(tap, true);
-        while !RESIDENT_QUIT.load(Ordering::Relaxed)
-            && (!context.selection.terminal() || context.input.has_owned_keys())
-        {
-            let wait = deadline
-                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
-                .unwrap_or(std::time::Duration::from_millis(100));
-            if wait.is_zero() {
-                context.selection.cancel();
+        if !resident_mode {
+            CFRunLoopAddSource(current, source, mode);
+            CGEventTapEnable(tap, true);
+        }
+        loop {
+            let (done, wait) = {
+                let context = &mut *context_ptr;
+                let expired =
+                    deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
+                if expired {
+                    context.selection.cancel();
+                }
+                let done = expired
+                    || RESIDENT_QUIT.load(Ordering::Relaxed)
+                    || (context.selection.terminal() && !context.input.has_owned_keys());
+                let wait = if expired {
+                    std::time::Duration::ZERO
+                } else {
+                    deadline
+                        .map(|deadline| {
+                            deadline.saturating_duration_since(std::time::Instant::now())
+                        })
+                        .unwrap_or(std::time::Duration::from_millis(100))
+                };
+                (done, wait)
+            };
+            if done {
                 break;
             }
             CFRunLoopRunInMode(mode, wait.as_secs_f64().min(0.1), false);
-            crate::ui::select(context.selection.selected());
+            let selected = (*context_ptr).selection.selected();
+            crate::ui::select(selected);
         }
-        CGEventTapEnable(tap, false);
-        CFRunLoopRemoveSource(current, source, mode);
-        CFMachPortInvalidate(tap);
-        CFRelease(source);
-        CFRelease(tap);
+        let tail = context
+            .input
+            .has_owned_keys()
+            .then(|| std::mem::take(&mut context.input));
+        if !resident.is_null() {
+            (*resident).tail = tail;
+        }
+        if resident_mode {
+            (*resident).active = ptr::null_mut();
+        } else {
+            CGEventTapEnable(tap, false);
+            CFRunLoopRemoveSource(current, source, mode);
+            CFMachPortInvalidate(tap);
+            CFRelease(source);
+            CFRelease(tap);
+        }
     }
     crate::ui::hide();
     if RESIDENT_QUIT.load(Ordering::Relaxed)
@@ -614,12 +849,19 @@ fn run_switch_session(
     }
     if let Some(index) = selected {
         let row = &snapshot.rows[index];
-        remember_candidate(&snapshot, index);
         println!(
             "Committing frozen candidate {index}: {:?} — {:?} (PID {})",
             row.app_name, row.title, row.pid
         );
         raise_from_list(&snapshot.owners[row.owner], row.window)?;
+        if let Some((pid, window)) = focused_window() {
+            if pid == row.pid {
+                let target = window_at(&snapshot.owners[row.owner], row.window)?;
+                if unsafe { CFEqual(window.0, target) != 0 } {
+                    remember_window(pid, window.0);
+                }
+            }
+        }
     } else {
         println!("Switch cancelled or expired; no window was raised.");
     }

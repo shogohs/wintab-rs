@@ -69,10 +69,10 @@ static void observe_application(NSRunningApplication *application) {
             registration->source = AXObserverGetRunLoopSource(registration->observer);
             if (registration->source != NULL) {
                 CFRunLoopAddSource(CFRunLoopGetMain(), registration->source, kCFRunLoopDefaultMode);
+                wintab_ax_observers[key] = registration;
             }
         }
     }
-    wintab_ax_observers[key] = registration;
 }
 
 void wintab_focus_tracking_start(void *context) {
@@ -93,7 +93,11 @@ void wintab_focus_tracking_start(void *context) {
             pid_t pid = application.processIdentifier;
             dispatch_async(dispatch_get_main_queue(), ^{
                 WintabAXObserver *registration = wintab_ax_observers[@(pid)];
-                if (registration != nil) record_application_focus(pid, registration->application);
+                AXUIElementRef app = registration != nil ? registration->application : AXUIElementCreateApplication(pid);
+                if (app != NULL) {
+                    record_application_focus(pid, app);
+                    if (registration == nil) CFRelease(app);
+                }
             });
         }
     }];
