@@ -28,7 +28,7 @@ static void update_permission_status(int status) {
     if (wintab_toggle_item != nil) {
         BOOL enabled = (status & 4) != 0;
         wintab_toggle_item.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
-        wintab_toggle_item.title = enabled ? @"一時停止" : @"有効にする";
+        wintab_toggle_item.title = @"有効";
         wintab_status_item.button.title = enabled ? @"WT" : @"WT⏸";
     }
 }
@@ -70,7 +70,7 @@ int wintab_status_run(int (*action)(int, void *), void *context, int enabled,
         if (wintab_status_item == nil) return 0;
         wintab_status_item.button.title = enabled ? @"WT" : @"WT⏸";
         NSMenu *menu = [NSMenu new];
-        wintab_toggle_item = [[NSMenuItem alloc] initWithTitle:(enabled ? @"一時停止" : @"有効にする") action:@selector(toggle:) keyEquivalent:@""];
+        wintab_toggle_item = [[NSMenuItem alloc] initWithTitle:@"有効" action:@selector(toggle:) keyEquivalent:@""];
         wintab_toggle_item.target = wintab_menu_target;
         wintab_toggle_item.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
         [menu addItem:wintab_toggle_item];
