@@ -16,7 +16,7 @@ unsafe extern "C" {
         action: MouseAction,
         context: *mut c_void,
     ) -> i32;
-    fn wintab_overlay_pointer_inside() -> i32;
+    fn wintab_overlay_handle_click() -> i32;
     fn wintab_overlay_select(selected: isize);
     fn wintab_overlay_hide();
     fn wintab_status_run(action: MenuAction, context: *mut c_void, enabled: c_int) -> i32;
@@ -44,8 +44,8 @@ pub fn show(
     }
 }
 
-pub fn pointer_inside() -> bool {
-    unsafe { wintab_overlay_pointer_inside() != 0 }
+pub fn handle_click() -> i32 {
+    unsafe { wintab_overlay_handle_click() }
 }
 
 pub fn select(selected: Option<usize>) {

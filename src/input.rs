@@ -58,6 +58,7 @@ pub struct Output {
 pub struct CaptureState {
     active: bool,
     owned_tab_down: bool,
+    owned_arrow_keys: u8,
     pub forward: u32,
     pub reverse: u32,
     pub committed: u32,
@@ -113,9 +114,36 @@ impl CaptureState {
                     end = self.end;
                 }
             }
+            Event::KeyDown { key, flags, repeat } if (123..=124).contains(&key) => {
+                let bit = 1_u8 << (key - 123);
+                if self.owned_arrow_keys & bit != 0 {
+                    suppress = true;
+                } else if flags & CMD != 0 && flags & (CTRL | OPTION) == 0 && !repeat {
+                    self.active = true;
+                    self.owned_arrow_keys |= bit;
+                    suppress = true;
+                    step = Some(if key == 123 {
+                        Direction::Reverse
+                    } else {
+                        Direction::Forward
+                    });
+                } else if self.active {
+                    self.active = false;
+                    self.end = Some(End::Cancel);
+                    self.cancelled = self.cancelled.saturating_add(1);
+                    end = self.end;
+                }
+            }
             Event::KeyUp { key: 48 } if self.owned_tab_down => {
                 self.owned_tab_down = false;
                 suppress = true;
+            }
+            Event::KeyUp { key } if (123..=124).contains(&key) => {
+                let bit = 1_u8 << (key - 123);
+                if self.owned_arrow_keys & bit != 0 {
+                    self.owned_arrow_keys &= !bit;
+                    suppress = true;
+                }
             }
             Event::KeyDown { .. } if self.active => {
                 self.active = false;
@@ -141,9 +169,24 @@ impl CaptureState {
     pub fn handle_owned_tail(&mut self, event: Event) -> Output {
         let suppress = match event {
             Event::KeyDown { key: 48, .. } if self.owned_tab_down => true,
+            Event::KeyDown { key, .. }
+                if (123..=124).contains(&key)
+                    && self.owned_arrow_keys & (1_u8 << (key - 123)) != 0 =>
+            {
+                true
+            }
             Event::KeyUp { key: 48 } if self.owned_tab_down => {
                 self.owned_tab_down = false;
                 true
+            }
+            Event::KeyUp { key } if (123..=124).contains(&key) => {
+                let bit = 1_u8 << (key - 123);
+                if self.owned_arrow_keys & bit != 0 {
+                    self.owned_arrow_keys &= !bit;
+                    true
+                } else {
+                    false
+                }
             }
             _ => false,
         };
@@ -263,6 +306,22 @@ mod tests {
         s.handle(Event::KeyUp { key: 48 });
         s.handle(down(48, CMD | SHIFT, false));
         assert_eq!((s.forward, s.reverse), (1, 1));
+    }
+
+    #[test]
+    fn command_arrows_move_and_suppress_owned_key_releases_and_repeats() {
+        let mut state = CaptureState::begin_with_tab_down();
+        let left = state.handle(down(123, CMD, false));
+        assert!(left.suppress);
+        assert_eq!(left.step, Some(Direction::Reverse));
+        let repeat = state.handle(down(123, CMD, true));
+        assert!(repeat.suppress);
+        assert_eq!(repeat.step, None);
+        let right = state.handle(down(124, CMD, false));
+        assert!(right.suppress);
+        assert_eq!(right.step, Some(Direction::Forward));
+        assert!(state.handle(Event::KeyUp { key: 123 }).suppress);
+        assert!(state.handle(Event::KeyUp { key: 124 }).suppress);
     }
 
     #[test]

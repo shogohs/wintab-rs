@@ -401,8 +401,12 @@ extern "C" fn switch_event(
     }
     let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
     if kind == K_CG_EVENT_LEFT_MOUSE_DOWN {
-        if !context.selection.terminal() && !crate::overlay::pointer_inside() {
-            context.selection.cancel();
+        if !context.selection.terminal() {
+            match crate::overlay::handle_click() {
+                -1 => context.selection.cancel(),
+                1 => return ptr::null_mut(),
+                _ => {}
+            }
         }
         return event;
     }

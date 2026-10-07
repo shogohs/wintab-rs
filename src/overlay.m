@@ -42,14 +42,24 @@ extern void wintab_record_focus(int pid, const void *window);
 - (void)mouseMoved:(NSEvent *)event {
     if (wintab_mouse_action != NULL) wintab_mouse_action(self.index, 0, wintab_mouse_context);
 }
-- (void)mouseDown:(NSEvent *)event {
-    if (wintab_mouse_action != NULL) wintab_mouse_action(self.index, 1, wintab_mouse_context);
-}
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
 @end
 
-int wintab_overlay_pointer_inside(void) {
-    return wintab_panel != nil && NSPointInRect([NSEvent mouseLocation], wintab_panel.frame);
+int wintab_overlay_handle_click(void) {
+    if (wintab_panel == nil) return -1;
+    NSPoint screen_point = [NSEvent mouseLocation];
+    if (!NSPointInRect(screen_point, wintab_panel.frame)) return -1;
+    NSPoint window_point = [wintab_panel convertPointFromScreen:screen_point];
+    NSView *content = wintab_panel.contentView;
+    NSPoint content_point = [content convertPoint:window_point fromView:nil];
+    for (WintabWindowItem *row in wintab_rows) {
+        NSPoint row_point = [row convertPoint:content_point fromView:content];
+        if (NSPointInRect(row_point, row.bounds)) {
+            if (wintab_mouse_action != NULL) wintab_mouse_action(row.index, 1, wintab_mouse_context);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 @interface WintabAXObserver : NSObject
