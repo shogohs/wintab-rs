@@ -3,9 +3,13 @@ use super::windows::{
     window_at, window_list, CandidateRow, CandidateSnapshot,
 };
 use super::*;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static RESIDENT_QUIT: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static MRU_WINDOWS: RefCell<Vec<(i32, OwnedCf)>> = const { RefCell::new(Vec::new()) };
+}
 
 struct ResidentContext {
     tap: CFMachPortRef,
@@ -99,6 +103,9 @@ extern "C" fn resident_menu_action(action: i32, user_info: *mut c_void) -> i32 {
                 }
             } else {
                 context.permitted = startup_permissions().is_ok_and(|(ax, input)| ax && input);
+                if context.permitted {
+                    remember_focused_window();
+                }
                 if context.permitted && install_resident_tap(context) {
                     context.enabled = true;
                 }
@@ -126,8 +133,9 @@ extern "C" fn begin_resident_switch(user_info: *mut c_void, reverse: i32) {
     }
     let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
     if context.enabled && context.permitted && !RESIDENT_QUIT.load(Ordering::Relaxed) {
-        let result = candidate_snapshot().and_then(|snapshot| {
+        let result = candidate_snapshot().and_then(|mut snapshot| {
             let focused = focused_candidate(&snapshot);
+            let focused = order_candidates(&mut snapshot, focused);
             run_switch_session(
                 snapshot,
                 focused,
@@ -156,6 +164,9 @@ pub fn resident() -> Result<(), String> {
     RESIDENT_QUIT.store(false, Ordering::Relaxed);
     crate::overlay::status_prepare();
     let (ax, input_monitoring) = startup_permissions()?;
+    if ax {
+        remember_focused_window();
+    }
     let mut context = ResidentContext {
         tap: ptr::null_mut(),
         source: ptr::null_mut(),
@@ -404,7 +415,7 @@ extern "C" fn switch_event(
     }
 }
 
-fn focused_candidate(snapshot: &CandidateSnapshot) -> Option<usize> {
+fn focused_window() -> Option<(i32, OwnedCf)> {
     let system = unsafe { AXUIElementCreateSystemWide() };
     if system.is_null() {
         return None;
@@ -421,15 +432,81 @@ fn focused_candidate(snapshot: &CandidateSnapshot) -> Option<usize> {
     if unsafe { AXUIElementSetMessagingTimeout(app.0, 1.0) } != K_AX_ERROR_SUCCESS {
         return None;
     }
+    let mut pid = 0;
+    if unsafe { AXUIElementGetPid(app.0, &mut pid) } != K_AX_ERROR_SUCCESS || pid <= 0 {
+        return None;
+    }
     let window_attr = cf_string(c"AXFocusedWindow").ok()?;
     let focused = copy_attribute(app.0, window_attr.0, "AXFocusedWindow").ok()?;
     if unsafe { CFGetTypeID(focused.0) } != unsafe { AXUIElementGetTypeID() } {
         return None;
     }
+    Some((pid, focused))
+}
+
+fn focused_candidate(snapshot: &CandidateSnapshot) -> Option<usize> {
+    let (pid, focused) = focused_window()?;
     snapshot.rows.iter().position(|row| {
-        window_at(&snapshot.owners[row.owner], row.window)
-            .is_ok_and(|window| unsafe { CFEqual(focused.0, window) != 0 })
+        row.pid == pid
+            && window_at(&snapshot.owners[row.owner], row.window)
+                .is_ok_and(|window| unsafe { CFEqual(focused.0, window) != 0 })
     })
+}
+
+fn remember_window(pid: i32, window: CFTypeRef) {
+    let retained = OwnedCf(unsafe { CFRetain(window) });
+    MRU_WINDOWS.with(|history| {
+        let mut history = history.borrow_mut();
+        history.retain(|(old_pid, old)| *old_pid != pid || unsafe { CFEqual(old.0, window) == 0 });
+        history.insert(0, (pid, retained));
+    });
+}
+
+fn remember_candidate(snapshot: &CandidateSnapshot, index: usize) {
+    if let Some(row) = snapshot.rows.get(index) {
+        if let Ok(window) = window_at(&snapshot.owners[row.owner], row.window) {
+            remember_window(row.pid, window);
+        }
+    }
+}
+
+fn remember_focused_window() {
+    if let Some((pid, window)) = focused_window() {
+        remember_window(pid, window.0);
+    }
+}
+
+fn order_candidates(snapshot: &mut CandidateSnapshot, focused: Option<usize>) -> Option<usize> {
+    if let Some(index) = focused {
+        remember_candidate(snapshot, index);
+    }
+    let recent = MRU_WINDOWS.with(|history| {
+        let history = history.borrow();
+        // ponytail: compare the small AX candidate list linearly; index caching is only needed if this becomes slow.
+        history
+            .iter()
+            .filter_map(|(pid, window)| {
+                snapshot.rows.iter().position(|row| {
+                    row.pid == *pid
+                        && window_at(&snapshot.owners[row.owner], row.window)
+                            .is_ok_and(|candidate| unsafe { CFEqual(candidate, window.0) != 0 })
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let order = crate::input::mru_order(snapshot.rows.len(), &recent);
+    let old_rows = std::mem::take(&mut snapshot.rows);
+    snapshot.rows = order.iter().map(|&index| old_rows[index].clone()).collect();
+    MRU_WINDOWS.with(|history| {
+        let mut next = Vec::with_capacity(snapshot.rows.len());
+        for row in &snapshot.rows {
+            if let Ok(window) = window_at(&snapshot.owners[row.owner], row.window) {
+                next.push((row.pid, OwnedCf(unsafe { CFRetain(window) })));
+            }
+        }
+        *history.borrow_mut() = next;
+    });
+    focused.map(|_| 0)
 }
 
 pub fn list_candidates() -> Result<(), String> {
@@ -444,8 +521,9 @@ pub fn list_candidates() -> Result<(), String> {
 }
 
 pub fn switch_global(seconds: f64) -> Result<(), String> {
-    let snapshot = candidate_snapshot()?;
+    let mut snapshot = candidate_snapshot()?;
     let focused = focused_candidate(&snapshot);
+    let focused = order_candidates(&mut snapshot, focused);
     run_switch(snapshot, focused, seconds)
 }
 
@@ -474,14 +552,12 @@ pub fn switch_pid(pid: i32, seconds: f64) -> Result<(), String> {
             title: title(window),
         });
     }
-    run_switch(
-        CandidateSnapshot {
-            owners: vec![list],
-            rows,
-        },
-        focused,
-        seconds,
-    )
+    let mut snapshot = CandidateSnapshot {
+        owners: vec![list],
+        rows,
+    };
+    let focused = order_candidates(&mut snapshot, focused);
+    run_switch(snapshot, focused, seconds)
 }
 
 fn run_switch(
@@ -608,6 +684,7 @@ fn run_switch_session(
     }
     if let Some(index) = selected {
         let row = &snapshot.rows[index];
+        remember_candidate(&snapshot, index);
         println!(
             "Committing frozen candidate {index}: {:?} — {:?} (PID {})",
             row.app_name, row.title, row.pid

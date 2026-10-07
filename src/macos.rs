@@ -48,6 +48,7 @@ unsafe extern "C" {
         value: *mut CFTypeRef,
     ) -> AXError;
     fn AXUIElementGetTypeID() -> usize;
+    fn AXUIElementGetPid(element: CFTypeRef, pid: *mut i32) -> AXError;
     fn AXUIElementIsAttributeSettable(
         element: CFTypeRef,
         attribute: CFStringRef,
@@ -115,6 +116,7 @@ unsafe extern "C" {
     fn CFNumberGetTypeID() -> usize;
     fn CFNumberGetValue(number: CFTypeRef, number_type: CFIndex, value: *mut c_void) -> u8;
     fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> u8;
+    fn CFRetain(value: CFTypeRef) -> CFTypeRef;
     fn CFRelease(value: CFTypeRef);
     fn CFMachPortCreateRunLoopSource(
         allocator: *const c_void,

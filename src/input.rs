@@ -30,6 +30,19 @@ pub fn candidate_owner_pids(entries: &[(i32, i32)], self_pid: i32) -> Vec<i32> {
     owners
 }
 
+pub fn mru_order(count: usize, recent: &[usize]) -> Vec<usize> {
+    let mut seen = vec![false; count];
+    let mut order = Vec::with_capacity(count);
+    for &index in recent {
+        if index < count && !seen[index] {
+            seen[index] = true;
+            order.push(index);
+        }
+    }
+    order.extend((0..count).filter(|&index| !seen[index]));
+    order
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Output {
     pub suppress: bool,
@@ -387,5 +400,10 @@ mod tests {
         let all = [(40, 0), (43, 0), (42, 0)];
         let entries: Vec<_> = visible.into_iter().chain(all).collect();
         assert_eq!(candidate_owner_pids(&entries, 1), vec![40, 42, 43]);
+    }
+
+    #[test]
+    fn mru_order_moves_recent_candidates_first_and_keeps_fallback_order() {
+        assert_eq!(mru_order(4, &[2, 0, 2, 9]), [2, 0, 1, 3]);
     }
 }

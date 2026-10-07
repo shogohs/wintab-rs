@@ -5,6 +5,7 @@ pub(super) struct WindowList {
     pub(super) windows: OwnedCf,
 }
 
+#[derive(Clone)]
 pub(super) struct CandidateRow {
     pub(super) owner: usize,
     pub(super) window: usize,

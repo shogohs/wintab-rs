@@ -19,7 +19,7 @@ docker compose run --rm rustfmt fmt --all        # format files
 
 GitHub Actionsの`macOS app` workflowは、Apple Silicon向けの`.app`を成果物として作成します。Actionsの成果物から`wintab-rs-macos-arm64.zip`を取得して展開してください。ビルド・テストはGitHub Actions上で行い、ローカルでは実行しません。
 
-`.app`はActionsでad-hoc署名を付けます（配布用の署名・公証ではありません）。Finderから起動するとメニューバーに`WT`が表示されます。Command+Tabで一覧を開き、Commandを離すと選択中のウィンドウへ切り替えます。メニューには有効／一時停止、プライバシーとセキュリティ設定、終了があります。
+`.app`はActionsでad-hoc署名を付けます（配布用の署名・公証ではありません）。Finderから起動するとメニューバーに`WT`が表示されます。Command+Tabで一覧を開き、最初に直前のウィンドウを選択します。Commandを離すと選択中のウィンドウへ切り替えます。メニューには有効／一時停止、プライバシーとセキュリティ設定、終了があります。
 
 ```sh
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --status
