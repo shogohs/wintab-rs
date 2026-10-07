@@ -114,7 +114,11 @@ impl CaptureState {
             }
             _ => {}
         }
-        Output { suppress, end, step }
+        Output {
+            suppress,
+            end,
+            step,
+        }
     }
 
     pub fn handle_owned_tail(&mut self, event: Event) -> Output {
@@ -131,7 +135,11 @@ impl CaptureState {
             }
             _ => false,
         };
-        Output { suppress, end: None, step: None }
+        Output {
+            suppress,
+            end: None,
+            step: None,
+        }
     }
 
     pub fn has_owned_keys(&self) -> bool {
@@ -162,7 +170,9 @@ impl Selection {
     }
 
     pub fn step(&mut self, direction: Direction) {
-        if self.end.is_some() || self.count == 0 { return; }
+        if self.end.is_some() || self.count == 0 {
+            return;
+        }
         self.cursor = Some(match (self.cursor, direction) {
             (Some(index), Direction::Forward) => (index + 1) % self.count,
             (Some(0), Direction::Reverse) => self.count - 1,
@@ -173,7 +183,9 @@ impl Selection {
     }
 
     pub fn finish(&mut self, end: End) {
-        if self.end.is_none() { self.end = Some(end); }
+        if self.end.is_none() {
+            self.end = Some(end);
+        }
     }
 
     pub fn cancel(&mut self) {
@@ -197,7 +209,9 @@ impl Selection {
         }
     }
 
-    pub fn terminal(&self) -> bool { self.end.is_some() }
+    pub fn terminal(&self) -> bool {
+        self.end.is_some()
+    }
 }
 
 #[cfg(test)]

@@ -399,8 +399,7 @@ mod macos {
         let attribute = cf_string(c"AXFocusedWindow").ok()?;
         let focused = copy_attribute(list.app.0, attribute.0, "AXFocusedWindow").ok()?;
         (0..count).find(|index| {
-            window_at(list, *index)
-                .is_ok_and(|window| unsafe { CFEqual(focused.0, window) != 0 })
+            window_at(list, *index).is_ok_and(|window| unsafe { CFEqual(focused.0, window) != 0 })
         })
     }
 
@@ -509,22 +508,25 @@ mod macos {
     }
 
     fn decode_event(kind: CGEventType, event: CGEventRef) -> crate::input::Event {
-        if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT
-            || kind == K_CG_EVENT_TAP_DISABLED_BY_USER
-        {
+        if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT || kind == K_CG_EVENT_TAP_DISABLED_BY_USER {
             crate::input::Event::Disabled
         } else if event.is_null() {
             crate::input::Event::Other
         } else if kind == K_CG_EVENT_KEY_DOWN {
-            let key = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
+            let key =
+                unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
             let flags = unsafe { CGEventGetFlags(event) };
-            let repeat = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT) } != 0;
+            let repeat =
+                unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT) } != 0;
             crate::input::Event::KeyDown { key, flags, repeat }
         } else if kind == K_CG_EVENT_KEY_UP {
-            let key = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
+            let key =
+                unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
             crate::input::Event::KeyUp { key }
         } else if kind == K_CG_EVENT_FLAGS_CHANGED {
-            crate::input::Event::FlagsChanged { flags: unsafe { CGEventGetFlags(event) } }
+            crate::input::Event::FlagsChanged {
+                flags: unsafe { CGEventGetFlags(event) },
+            }
         } else {
             crate::input::Event::Other
         }
@@ -610,7 +612,9 @@ mod macos {
         event: CGEventRef,
         user_info: *mut c_void,
     ) -> CGEventRef {
-        if user_info.is_null() { return event; }
+        if user_info.is_null() {
+            return event;
+        }
         let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
         let decoded = decode_event(kind, event);
         let output = if decoded == crate::input::Event::Disabled {
@@ -626,30 +630,44 @@ mod macos {
             context.input.handle_owned_tail(decoded)
         } else {
             let output = context.input.handle(decoded);
-            if let Some(direction) = output.step { context.selection.step(direction); }
-            if let Some(end) = output.end { context.selection.finish(end); }
+            if let Some(direction) = output.step {
+                context.selection.step(direction);
+            }
+            if let Some(end) = output.end {
+                context.selection.finish(end);
+            }
             output
         };
-        if output.suppress { ptr::null_mut() } else { event }
+        if output.suppress {
+            ptr::null_mut()
+        } else {
+            event
+        }
     }
 
     pub fn switch(pid: i32, seconds: f64) -> Result<(), String> {
         let list = window_list(pid)?;
         let count = usize::try_from(unsafe { CFArrayGetCount(list.windows.0) })
             .map_err(|_| "AXWindows returned a negative count")?;
-        if count == 0 { return Err(format!("PID {pid} has no AX windows to switch to")); }
+        if count == 0 {
+            return Err(format!("PID {pid} has no AX windows to switch to"));
+        }
         let focused = focused_index(&list, count);
         let mut titles = Vec::with_capacity(count);
         for index in 0..count {
             let window = window_at(&list, index)?;
             let timeout = unsafe { AXUIElementSetMessagingTimeout(window, 1.0) };
             if timeout != K_AX_ERROR_SUCCESS {
-                return Err(format!("Could not set AX timeout for window {index} (AXError {timeout})"));
+                return Err(format!(
+                    "Could not set AX timeout for window {index} (AXError {timeout})"
+                ));
             }
             titles.push(title(window));
         }
         println!("Frozen AX window list for PID {pid} (indexes can change after AX operations):");
-        for (index, title) in titles.iter().enumerate() { println!("{index}: {title:?}"); }
+        for (index, title) in titles.iter().enumerate() {
+            println!("{index}: {title:?}");
+        }
         if let Some(index) = focused {
             println!("Initial focus is window {index}; first Tab selects the next window.");
         } else {
@@ -708,7 +726,9 @@ mod macos {
         let disabled = context.input.end == Some(crate::input::End::Disabled);
         drop(context);
         if disabled {
-            return Err("The switch event tap was disabled; the selected window was not raised.".into());
+            return Err(
+                "The switch event tap was disabled; the selected window was not raised.".into(),
+            );
         }
         if let Some(index) = selected {
             println!("Committing frozen window {index}: {:?}", titles[index]);
