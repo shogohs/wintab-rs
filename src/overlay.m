@@ -37,30 +37,30 @@ static NSUInteger wintab_panel_generation;
     [NSGraphicsContext saveGraphicsState];
     if (self.selected) {
         NSShadow *shadow = [NSShadow new];
-        shadow.shadowColor = [NSColor colorWithWhite:0.38 alpha:0.78];
-        shadow.shadowBlurRadius = 4.0;
+        shadow.shadowColor = NSColor.systemBlueColor;
+        shadow.shadowBlurRadius = 6.0;
         shadow.shadowOffset = NSZeroSize;
         [shadow set];
     }
     [self.icon drawInRect:iconRect];
     [NSGraphicsContext restoreGraphicsState];
     if (self.badge.length == 0 || iconRect.size.width < 24) return;
-    CGFloat height = MIN(20.0, MAX(12.0, iconRect.size.height * 0.23));
+    CGFloat height = iconRect.size.height * 0.23;
     CGFloat maxWidth = iconRect.size.width * 0.62;
-    CGFloat fontSize = MIN(12.0, MAX(7.0, height * 0.62));
+    CGFloat fontSize = height * 0.62;
     NSFont *font = [NSFont boldSystemFontOfSize:fontSize];
     NSString *text = self.badge;
     NSMutableParagraphStyle *paragraph = [NSMutableParagraphStyle new];
     paragraph.alignment = NSTextAlignmentCenter;
     paragraph.lineBreakMode = NSLineBreakByTruncatingTail;
     NSDictionary *attributes = @{ NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.whiteColor, NSParagraphStyleAttributeName: paragraph };
-    CGFloat width = MIN(maxWidth, [text sizeWithAttributes:@{ NSFontAttributeName: font }].width + 10.0);
+    CGFloat width = MIN(maxWidth, [text sizeWithAttributes:@{ NSFontAttributeName: font }].width + height * 0.5);
     NSRect badgeRect = NSMakeRect(NSMaxX(iconRect) - width, NSMaxY(iconRect) - height, width, height);
     [[NSColor colorWithRed:0.90 green:0.12 blue:0.16 alpha:1.0] setFill];
     [[NSBezierPath bezierPathWithRoundedRect:badgeRect xRadius:height / 2.0 yRadius:height / 2.0] fill];
     [NSGraphicsContext saveGraphicsState];
     NSRectClip(badgeRect);
-    [text drawInRect:NSInsetRect(badgeRect, 5.0, 1.0) withAttributes:attributes];
+    [text drawInRect:NSInsetRect(badgeRect, height * 0.25, height * 0.05) withAttributes:attributes];
     [NSGraphicsContext restoreGraphicsState];
 }
 
@@ -153,7 +153,7 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         wintab_panel.acceptsMouseMovedEvents = YES;
         wintab_panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
         wintab_panel.opaque = NO;
-        NSColor *fallback_background = [NSColor.windowBackgroundColor colorWithAlphaComponent:0.672];
+        NSColor *fallback_background = [NSColor.windowBackgroundColor colorWithAlphaComponent:0.7728];
         wintab_panel.backgroundColor = NSColor.clearColor;
         wintab_panel.hasShadow = YES;
 
@@ -193,14 +193,14 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         wintab_selected_title.frame = NSMakeRect(24, 8, width - 48, 38);
         wintab_selected_title.alignment = NSTextAlignmentCenter;
         wintab_selected_title.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        wintab_selected_title.font = [NSFont systemFontOfSize:26.0];
+        wintab_selected_title.font = [NSFont systemFontOfSize:17.0];
         [content addSubview:wintab_selected_title];
         if (@available(macOS 26.0, *)) {
             NSGlassEffectView *glass = [NSGlassEffectView new];
             glass.frame = content.frame;
             glass.cornerRadius = background_corner_radius;
             glass.style = NSGlassEffectViewStyleRegular;
-            glass.alphaValue = 0.70;
+            glass.alphaValue = 0.805;
             glass.wantsLayer = YES;
             glass.layer.cornerRadius = background_corner_radius;
             glass.layer.cornerCurve = kCACornerCurveContinuous;
