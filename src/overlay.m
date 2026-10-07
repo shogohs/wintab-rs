@@ -19,7 +19,6 @@ static NSUInteger wintab_panel_generation;
 @property(nonatomic, strong) NSImage *icon;
 @property(nonatomic, copy) NSString *badge;
 @property(nonatomic, copy) NSString *bundleKey;
-@property(nonatomic) BOOL selected;
 @end
 
 @implementation WintabWindowItem
@@ -33,16 +32,6 @@ static NSUInteger wintab_panel_generation;
 }
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
-    if (self.selected) {
-        NSRect selectionRect = NSInsetRect(self.bounds, 1.0, 1.0);
-        CGFloat cornerRadius = MIN(12.0, MIN(selectionRect.size.width, selectionRect.size.height) / 2.0);
-        NSBezierPath *selection = [NSBezierPath bezierPathWithRoundedRect:selectionRect xRadius:cornerRadius yRadius:cornerRadius];
-        [[NSColor.systemBlueColor colorWithAlphaComponent:0.18] setFill];
-        [selection fill];
-        [[NSColor.systemBlueColor colorWithAlphaComponent:1.0] setStroke];
-        selection.lineWidth = 2.0;
-        [selection stroke];
-    }
     NSRect iconRect = NSInsetRect(self.bounds, 4, 4);
     [self.icon drawInRect:iconRect];
     if (self.badge.length == 0 || iconRect.size.width < 24) return;
@@ -66,7 +55,11 @@ static NSUInteger wintab_panel_generation;
         [[NSBezierPath bezierPathWithRoundedRect:badgeRect xRadius:height / 2.0 yRadius:height / 2.0] fill];
         [NSGraphicsContext saveGraphicsState];
         NSRectClip(badgeRect);
-        [text drawInRect:NSInsetRect(badgeRect, horizontalPadding, verticalPadding) withAttributes:attributes];
+        NSRect textRect = NSMakeRect(NSMinX(badgeRect) + (badgeRect.size.width - textSize.width) / 2.0,
+                                     NSMinY(badgeRect) + (badgeRect.size.height - textSize.height) / 2.0,
+                                     textSize.width,
+                                     textSize.height);
+        [text drawAtPoint:textRect.origin withAttributes:attributes];
         [NSGraphicsContext restoreGraphicsState];
     } else {
         CGFloat diameter = MIN(height * 0.45, MIN(iconRect.size.width, iconRect.size.height));
@@ -125,8 +118,9 @@ int wintab_overlay_handle_click(void) {
 static void set_selected_row(NSInteger selected) {
     for (NSUInteger index = 0; index < wintab_rows.count; index++) {
         WintabWindowItem *row = (WintabWindowItem *)wintab_rows[index];
-        row.selected = (NSInteger)index == selected;
-        [row setNeedsDisplay:YES];
+        row.layer.backgroundColor = (NSInteger)index == selected
+            ? [NSColor.systemBlueColor colorWithAlphaComponent:0.18].CGColor
+            : NSColor.clearColor.CGColor;
     }
     if (selected >= 0 && (NSUInteger)selected < wintab_rows.count) {
         wintab_selected_title.stringValue = wintab_titles[(NSUInteger)selected];
@@ -178,7 +172,8 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
             CGFloat x = (width - ((CGFloat)count * item_stride - item_spacing)) / 2.0 + (CGFloat)index * item_stride;
             WintabWindowItem *row = [[WintabWindowItem alloc] initWithFrame:NSMakeRect(x, 58.0, row_size, row_size)];
             row.wantsLayer = YES;
-            row.layer.cornerRadius = 12.0;
+            row.layer.cornerRadius = row_size * 0.22;
+            row.layer.cornerCurve = kCACornerCurveContinuous;
             row.index = (NSInteger)index;
             NSNumber *pid = @(pids[index]);
             NSRunningApplication *runningApp = [NSRunningApplication runningApplicationWithProcessIdentifier:pids[index]];
