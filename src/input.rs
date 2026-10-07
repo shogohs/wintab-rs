@@ -41,7 +41,6 @@ pub struct Output {
 pub struct CaptureState {
     active: bool,
     owned_tab_down: bool,
-    owned_escape_down: bool,
     pub forward: u32,
     pub reverse: u32,
     pub committed: u32,
@@ -93,28 +92,11 @@ impl CaptureState {
                 self.owned_tab_down = false;
                 suppress = true;
             }
-            Event::KeyDown {
-                key: 53,
-                flags: _,
-                repeat,
-            } if self.active && !repeat => {
-                self.owned_escape_down = true;
-                self.active = false;
-                self.end = Some(End::Cancel);
-                self.cancelled = self.cancelled.saturating_add(1);
-                suppress = true;
-                end = self.end;
-            }
-            Event::KeyDown { key: 53, .. } if self.owned_escape_down => suppress = true,
             Event::KeyDown { .. } if self.active => {
                 self.active = false;
                 self.end = Some(End::Cancel);
                 self.cancelled = self.cancelled.saturating_add(1);
                 end = self.end;
-            }
-            Event::KeyUp { key: 53 } if self.owned_escape_down => {
-                self.owned_escape_down = false;
-                suppress = true;
             }
             Event::FlagsChanged { flags } if self.active && flags & CMD == 0 => {
                 self.active = false;
@@ -138,11 +120,6 @@ impl CaptureState {
                 self.owned_tab_down = false;
                 true
             }
-            Event::KeyDown { key: 53, .. } if self.owned_escape_down => true,
-            Event::KeyUp { key: 53 } if self.owned_escape_down => {
-                self.owned_escape_down = false;
-                true
-            }
             _ => false,
         };
         Output {
@@ -153,7 +130,7 @@ impl CaptureState {
     }
 
     pub fn has_owned_keys(&self) -> bool {
-        self.owned_tab_down || self.owned_escape_down
+        self.owned_tab_down
     }
 }
 
@@ -269,17 +246,6 @@ mod tests {
     }
 
     #[test]
-    fn escape_cancels_and_pairs_keyup() {
-        let mut s = CaptureState::default();
-        s.handle(down(48, CMD, false));
-        assert_eq!(s.handle(down(53, CMD, false)).end, Some(End::Cancel));
-        assert!(s.handle(down(53, CMD, true)).suppress);
-        assert_eq!(s.handle(Event::FlagsChanged { flags: 0 }).end, None);
-        assert_eq!(s.cancelled, 1);
-        assert!(s.handle(Event::KeyUp { key: 53 }).suppress);
-    }
-
-    #[test]
     fn aggregate_command_stays_active_until_all_command_keys_are_up() {
         let mut s = CaptureState::default();
         s.handle(down(48, CMD, false));
@@ -299,7 +265,6 @@ mod tests {
         assert_eq!(output.end, Some(End::Disabled));
         assert_eq!((s.forward, s.reverse), (0, 0));
         assert!(!s.handle(Event::KeyUp { key: 48 }).suppress);
-        assert!(!s.handle(Event::KeyUp { key: 53 }).suppress);
     }
 
     #[test]
