@@ -13,7 +13,7 @@ Rust標準ライブラリだけではmacOSのGUI・入力介入・他アプリ�
 
 ### 担当分担
 
-- GPT-6 Astra: 仕様整理、計画、作業分割、GPT-6 Lunaへの指揮、レビュー、各フェーズの完了判断を担当する。要件変更の最終判断はユーザーに求める。
+- GPT-6.1 Sol: 仕様整理、計画、作業分割、必要に応じた実装担当への指揮、レビュー、各フェーズの完了判断を担当する。要件変更の最終判断はユーザーに求める。
 - GPT-6 Luna: 指示された実装、テストの作成、GitHub Actionsの整備、検証結果に基づく修正を担当する。
 
 実装開始は承認済み。現段階ではフェーズ1のCI・ビルド基盤と公開APIを確認する診断用PoCを実装する。
@@ -68,7 +68,9 @@ AXのフォーカス変更通知とアプリの起動・終了・アクティブ
 
 最初の縦切りはActions成果物の生成、Accessibility権限とAX APIへのアクセス、入力を抑止しないイベントタップの診断までとする。診断用PoCは完成版の切り替えアプリではない。以下の入力抑止・個別前面化・全Space対応の実機検証が終わるまで、フェーズ1を完了扱いにしない。
 
-現状: 診断用PoCとworkflowの初期実装段階。GitHub Actionsは未実行であり、フォーマット・コンパイル・テストの成功と`.app`成果物の生成は未確認。対象実機でのGUI・権限・入力監視の検証も未完了。
+現状: 診断用PoCとworkflowの初期実装段階。既存のActions成果物を使った起動確認は下記に記録した。起動時に未許可のAccessibility・入力監視権限を要求する処理を追加し、現在のプロセスの許可状態と実行場所、設定後の再起動手順を表示する。この変更のCI結果と、権限要求・許可後のAX応答・入力監視の実機検証は未確認。
+
+権限要求は公開APIの`AXIsProcessTrustedWithOptions`（`kAXTrustedCheckOptionPrompt = true`）と`CGRequestListenEventAccess`を使う。Accessibility要求は非同期で、その戻り値は要求時点の許可状態を示す。CLIは許可を待って常駐せず、未許可なら設定と再起動を案内する。許可を拒否されたと即断せず、設定がONでも未許可なら実行場所・登録対象・ad-hoc署名変更を確認する。[Apple: Accessibility権限要求](https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions)、[入力監視権限要求](https://developer.apple.com/documentation/coregraphics/cgrequestlisteneventaccess())
 
 1. 最小のRustプロジェクトとGitHub ActionsのCIを用意し、fmt／check／testとarm64 releaseの`.app`生成・アーカイブ保存までの基盤を先に整える。
 2. 最小限のmacOSバインディングを追加し、安定したバンドルIDの最小`.app`をActionsで生成する。実機の起動場所を定め、成果物の起動と権限の付与先を確認する。
@@ -113,6 +115,15 @@ AXのフォーカス変更通知とアプリの起動・終了・アクティブ
 macOSの権限・イベント抑止・実ウィンドウの入力フォーカスは、Actions成果物を使ってmacOS 27／Apple Silicon実機で確認する。手動検証では対象コミット・Actionsの実行、OS、アプリ名、操作、期待結果、実結果を短く記録する。候補の見た目だけで前面化成功と判定しない。
 
 GitHub Actions上で`cargo fmt --check`、`cargo check`、`cargo test`を実行し、アプリのビルドも同環境で行う。診断用PoCの実装だけで実機動作を検証済みとはしない。Actionsの実行結果と実機での確認結果は区別して記録する。
+
+### 手動確認記録
+
+- 2026-10-07、Actions成果物を起動し、arm64のMach-O、Info.plist、ad-hoc署名を確認した。
+- 引数なしの診断コマンドは起動し、Accessibility未許可を表示した。
+- `--tap-seconds 5`はイベントタップ作成時にInput Monitoring権限がないとして終了した。権限設定は変更していない。
+- その後ユーザーから、設定をONにしているはずでもエラーが表示されると報告を受けた。旧PoCはAccessibilityの状態確認だけを行い、入力監視はタップ作成失敗から権限不足を推測していた。起動時の権限要求と個別の許可状態の表示を追加するが、実際の設定対象やエラーの原因は未確定。
+- 権限要求後も`AXIsProcessTrusted`はfalseで、イベントタップも作成できなかった。設定がONという報告との不一致は解消していない。この結果だけで権限設定の対象や署名が原因と断定しない。
+- AX件数の取得とGUI動作は未確認。切り替え機能自体もまだ実装されていない。
 
 ## 5. 追加判断が必要になる条件
 

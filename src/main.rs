@@ -17,6 +17,7 @@ mod macos {
     type CFMachPortRef = *mut c_void;
     type CFRunLoopSourceRef = *mut c_void;
     type CFRunLoopRef = *mut c_void;
+    type CFDictionaryRef = *const c_void;
 
     const K_CFSTRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const K_AX_ERROR_SUCCESS: AXError = 0;
@@ -30,7 +31,11 @@ mod macos {
     const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
-        fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrusted() -> u8;
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
+        fn CGPreflightListenEventAccess() -> bool;
+        fn CGRequestListenEventAccess() -> bool;
         fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
         fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout: f32) -> AXError;
         fn AXUIElementCopyAttributeValue(
@@ -58,6 +63,15 @@ mod macos {
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            count: CFIndex,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> CFDictionaryRef;
+        static kCFBooleanTrue: CFTypeRef;
         fn CFStringCreateWithCString(
             allocator: *const c_void,
             text: *const i8,
@@ -100,7 +114,80 @@ mod macos {
     }
 
     pub fn trusted() -> bool {
-        unsafe { AXIsProcessTrusted() }
+        unsafe { AXIsProcessTrusted() != 0 }
+    }
+
+    fn request_ax() -> Result<(), String> {
+        let keys = [unsafe { kAXTrustedCheckOptionPrompt }];
+        let values = [unsafe { kCFBooleanTrue }];
+        let options = unsafe {
+            CFDictionaryCreate(
+                ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        if options.is_null() {
+            return Err("Could not create Accessibility prompt options".into());
+        }
+        let options = OwnedCf(options);
+        // The prompt is asynchronous; startup checks the current process status afterward.
+        unsafe { AXIsProcessTrustedWithOptions(options.0) };
+        Ok(())
+    }
+
+    pub fn startup_permissions() -> Result<(bool, bool), String> {
+        let mut ax = trusted();
+        let mut input = unsafe { CGPreflightListenEventAccess() };
+        if ax && input {
+            println!("Accessibility: granted");
+            println!("Input Monitoring: granted");
+            return Ok((ax, input));
+        }
+
+        let path = std::env::current_exe()
+            .map_err(|e| format!("Could not determine app path: {e}"))?;
+        eprintln!(
+            "Requesting missing permissions. Executable: {}",
+            path.display()
+        );
+        eprintln!(
+            "Enable wintab-rs in System Settings > Privacy & Security > Accessibility and/or Input Monitoring, then relaunch this app."
+        );
+        if !ax {
+            request_ax()?;
+        }
+        if !input {
+            unsafe { CGRequestListenEventAccess() };
+        }
+        ax = trusted();
+        input = unsafe { CGPreflightListenEventAccess() };
+        println!(
+            "Accessibility: {}",
+            if ax {
+                "granted"
+            } else {
+                "not granted to this process; permission requested; grant in System Settings, then relaunch"
+            }
+        );
+        println!(
+            "Input Monitoring: {}",
+            if input {
+                "granted"
+            } else {
+                "not granted to this process; permission requested; grant in System Settings, then relaunch"
+            }
+        );
+        if !ax || !input {
+            eprintln!(
+                "If already enabled, remove and re-add this app in System Settings (an updated ad-hoc app identity or launch path can be stale), then relaunch: {}",
+                path.display()
+            );
+        }
+        Ok((ax, input))
     }
 
     pub fn windows_count(pid: i32) -> Result<usize, String> {
@@ -184,7 +271,7 @@ mod macos {
         };
         if tap.is_null() {
             return Err(
-                "Could not create listen-only event tap. Check Input Monitoring permission.".into(),
+                "Could not create listen-only event tap. Check Input Monitoring permission and other event-tap requirements.".into(),
             );
         }
         let source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), tap, 0) };
@@ -240,49 +327,51 @@ fn run() -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        match args.as_slice() {
-            [] => {
-                println!("wintab-rs phase 1 diagnostic PoC");
-                if macos::trusted() {
-                    println!("Accessibility: granted");
-                } else {
-                    println!(
-                        "Accessibility: not granted. Enable wintab-rs in System Settings > Privacy & Security > Accessibility, then relaunch it."
-                    );
+        enum Command {
+            Status,
+            Pid(i32),
+            Tap(f64),
+        }
+        let command = match args.as_slice() {
+            [] => Command::Status,
+            [flag, pid] if flag == "--pid" => {
+                let pid: i32 = pid
+                    .parse()
+                    .map_err(|_| "PID must be a positive integer")?;
+                if pid <= 0 {
+                    return Err("PID must be a positive integer".into());
                 }
-                println!(
-                    "Input Monitoring: if --tap-seconds cannot create an event tap, enable wintab-rs in System Settings > Privacy & Security > Input Monitoring, then relaunch it."
-                );
+                Command::Pid(pid)
+            }
+            [flag, duration] if flag == "--tap-seconds" => Command::Tap(parse_seconds(duration)?),
+            _ => return Err("Usage: wintab-rs [--pid PID | --tap-seconds SECONDS]".into()),
+        };
+        let (ax, input_monitoring) = macos::startup_permissions()?;
+        match command {
+            Command::Status => {
+                println!("wintab-rs phase 1 diagnostic PoC");
                 println!(
                     "Use --pid PID to count an application's AX windows, or --tap-seconds N for a short listen-only input-monitoring check."
                 );
                 Ok(())
             }
-            [flag, pid] if flag == "--pid" => {
-                let pid: i32 = pid
-                    .parse()
-                    .map_err(|_| "PID must be a positive integer".to_string())?;
-                if pid <= 0 {
-                    return Err("PID must be a positive integer".into());
-                }
-                if !macos::trusted() {
-                    return Err(
-                        "Accessibility is not granted. Enable wintab-rs in System Settings > Privacy & Security > Accessibility, then relaunch it."
-                            .into(),
-                    );
+            Command::Pid(pid) => {
+                if !ax {
+                    return Ok(());
                 }
                 let count = macos::windows_count(pid)?;
                 println!("AX windows for PID {pid}: {count}");
                 Ok(())
             }
-            [flag, duration] if flag == "--tap-seconds" => {
-                let seconds = parse_seconds(duration)?;
+            Command::Tap(seconds) => {
+                if !input_monitoring {
+                    return Ok(());
+                }
                 println!(
                     "Listening for key-down events for {seconds:.1}s; all events pass through unchanged."
                 );
                 macos::listen(seconds)
             }
-            _ => Err("Usage: wintab-rs [--pid PID | --tap-seconds SECONDS]".into()),
         }
     }
 }
