@@ -19,6 +19,7 @@ static NSUInteger wintab_panel_generation;
 @property(nonatomic, strong) NSImage *icon;
 @property(nonatomic, copy) NSString *badge;
 @property(nonatomic, copy) NSString *bundleKey;
+@property(nonatomic) BOOL selected;
 @end
 
 @implementation WintabWindowItem
@@ -33,7 +34,16 @@ static NSUInteger wintab_panel_generation;
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
     NSRect iconRect = NSInsetRect(self.bounds, 4, 4);
+    [NSGraphicsContext saveGraphicsState];
+    if (self.selected) {
+        NSShadow *shadow = [NSShadow new];
+        shadow.shadowColor = [NSColor colorWithWhite:0.38 alpha:0.78];
+        shadow.shadowBlurRadius = 4.0;
+        shadow.shadowOffset = NSZeroSize;
+        [shadow set];
+    }
     [self.icon drawInRect:iconRect];
+    [NSGraphicsContext restoreGraphicsState];
     if (self.badge.length == 0 || iconRect.size.width < 24) return;
     CGFloat height = MIN(20.0, MAX(12.0, iconRect.size.height * 0.23));
     CGFloat maxWidth = iconRect.size.width * 0.62;
@@ -103,9 +113,9 @@ int wintab_overlay_handle_click(void) {
 
 static void set_selected_row(NSInteger selected) {
     for (NSUInteger index = 0; index < wintab_rows.count; index++) {
-        NSView *row = wintab_rows[index];
-        BOOL is_selected = (NSInteger)index == selected;
-        row.layer.backgroundColor = is_selected ? NSColor.selectedContentBackgroundColor.CGColor : NSColor.clearColor.CGColor;
+        WintabWindowItem *row = (WintabWindowItem *)wintab_rows[index];
+        row.selected = (NSInteger)index == selected;
+        [row setNeedsDisplay:YES];
     }
     if (selected >= 0 && (NSUInteger)selected < wintab_rows.count) {
         wintab_selected_title.stringValue = wintab_titles[(NSUInteger)selected];
@@ -122,6 +132,7 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         wintab_mouse_context = context;
         const CGFloat icon_size = 94.0;
         const CGFloat item_spacing = 12.0;
+        const CGFloat background_corner_radius = 26.0;
         NSRect screen = NSScreen.screens.firstObject.visibleFrame;
         CGFloat max_width = screen.size.width - 32.0;
         CGFloat width = MIN(MAX(360.0, (CGFloat)count * (icon_size + 20.0) + 40.0), max_width);
@@ -142,7 +153,7 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         wintab_panel.acceptsMouseMovedEvents = YES;
         wintab_panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
         wintab_panel.opaque = NO;
-        NSColor *fallback_background = [NSColor.windowBackgroundColor colorWithAlphaComponent:0.96];
+        NSColor *fallback_background = [NSColor.windowBackgroundColor colorWithAlphaComponent:0.672];
         wintab_panel.backgroundColor = NSColor.clearColor;
         wintab_panel.hasShadow = YES;
 
@@ -187,12 +198,21 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         if (@available(macOS 26.0, *)) {
             NSGlassEffectView *glass = [NSGlassEffectView new];
             glass.frame = content.frame;
-            glass.cornerRadius = 16.0;
+            glass.cornerRadius = background_corner_radius;
             glass.style = NSGlassEffectViewStyleRegular;
-            glass.contentView = content;
-            wintab_panel.contentView = glass;
+            glass.alphaValue = 0.70;
+            glass.wantsLayer = YES;
+            glass.layer.cornerRadius = background_corner_radius;
+            glass.layer.cornerCurve = kCACornerCurveContinuous;
+            glass.layer.masksToBounds = YES;
+            NSView *glassContent = [[NSView alloc] initWithFrame:glass.bounds];
+            glass.contentView = glassContent;
+            [content addSubview:glass positioned:NSWindowBelow relativeTo:nil];
+            wintab_panel.contentView = content;
         } else {
-            content.layer.cornerRadius = 16.0;
+            content.layer.cornerRadius = background_corner_radius;
+            content.layer.cornerCurve = kCACornerCurveContinuous;
+            content.layer.masksToBounds = YES;
             content.layer.backgroundColor = fallback_background.CGColor;
             wintab_panel.contentView = content;
         }
@@ -206,7 +226,10 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
 
 void wintab_overlay_select(NSInteger selected) {
     @autoreleasepool {
-        if (wintab_panel != nil) set_selected_row(selected);
+        if (wintab_panel != nil) {
+            set_selected_row(selected);
+            [wintab_panel displayIfNeeded];
+        }
     }
 }
 
