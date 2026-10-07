@@ -124,7 +124,7 @@ static void set_selected_row(NSInteger selected) {
     for (NSUInteger index = 0; index < wintab_rows.count; index++) {
         WintabWindowItem *row = (WintabWindowItem *)wintab_rows[index];
         row.layer.backgroundColor = (NSInteger)index == selected
-            ? [NSColor.systemBlueColor colorWithAlphaComponent:0.18].CGColor
+            ? NSColor.unemphasizedSelectedContentBackgroundColor.CGColor
             : NSColor.clearColor.CGColor;
     }
     if (selected >= 0 && (NSUInteger)selected < wintab_rows.count) {
@@ -149,7 +149,12 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         CGFloat fitted_icon_size = MAX(1.0, MIN(icon_size, (width - 40.0 - (CGFloat)(count - 1) * item_spacing) / (CGFloat)count));
         CGFloat item_stride = fitted_icon_size + item_spacing;
         CGFloat row_size = fitted_icon_size + 8.0;
-        CGFloat height = 186.0;
+        const CGFloat title_height = 24.0;
+        const CGFloat bottom_padding = 12.0;
+        const CGFloat title_gap = 8.0;
+        const CGFloat top_padding = 20.0;
+        CGFloat row_y = bottom_padding + title_height + title_gap;
+        CGFloat height = row_y + row_size + top_padding;
         NSRect frame = NSMakeRect(NSMidX(screen) - width / 2.0,
                                   NSMidY(screen) - height / 2.0,
                                   width,
@@ -175,9 +180,9 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         NSMutableDictionary<NSNumber *, NSString *> *bundleKeys = [NSMutableDictionary dictionary];
         for (NSUInteger index = 0; index < count; index++) {
             CGFloat x = (width - ((CGFloat)count * item_stride - item_spacing)) / 2.0 + (CGFloat)index * item_stride;
-            WintabWindowItem *row = [[WintabWindowItem alloc] initWithFrame:NSMakeRect(x, 58.0, row_size, row_size)];
+            WintabWindowItem *row = [[WintabWindowItem alloc] initWithFrame:NSMakeRect(x, row_y, row_size, row_size)];
             row.wantsLayer = YES;
-            row.layer.cornerRadius = row_size * 0.22;
+            row.layer.cornerRadius = MIN(12.0, row_size / 2.0);
             row.layer.cornerCurve = kCACornerCurveContinuous;
             row.index = (NSInteger)index;
             NSNumber *pid = @(pids[index]);
@@ -201,25 +206,18 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
             [wintab_rows addObject:row];
         }
         wintab_selected_title = [NSTextField labelWithString:@""];
-        wintab_selected_title.frame = NSMakeRect(24, 8, width - 48, 38);
+        wintab_selected_title.frame = NSMakeRect(24, bottom_padding, width - 48, title_height);
         wintab_selected_title.alignment = NSTextAlignmentCenter;
         wintab_selected_title.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        wintab_selected_title.font = [NSFont systemFontOfSize:17.0];
+        wintab_selected_title.font = [NSFont systemFontOfSize:NSFont.systemFontSize];
         [content addSubview:wintab_selected_title];
         if (@available(macOS 26.0, *)) {
             NSGlassEffectView *glass = [NSGlassEffectView new];
             glass.frame = content.frame;
             glass.cornerRadius = background_corner_radius;
             glass.style = NSGlassEffectViewStyleRegular;
-            glass.alphaValue = 1.0;
-            glass.wantsLayer = YES;
-            glass.layer.cornerRadius = background_corner_radius;
-            glass.layer.cornerCurve = kCACornerCurveContinuous;
-            glass.layer.masksToBounds = YES;
-            NSView *glassContent = [[NSView alloc] initWithFrame:glass.bounds];
-            glass.contentView = glassContent;
-            [content addSubview:glass positioned:NSWindowBelow relativeTo:nil];
-            wintab_panel.contentView = content;
+            glass.contentView = content;
+            wintab_panel.contentView = glass;
         } else {
             content.layer.cornerRadius = background_corner_radius;
             content.layer.cornerCurve = kCACornerCurveContinuous;
