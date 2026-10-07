@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static RESIDENT_QUIT: AtomicBool = AtomicBool::new(false);
+const MAX_MRU_WINDOWS: usize = 128;
 thread_local! {
     static MRU_WINDOWS: RefCell<Vec<(i32, OwnedCf)>> = const { RefCell::new(Vec::new()) };
 }
@@ -459,7 +460,15 @@ fn remember_window(pid: i32, window: CFTypeRef) {
         let mut history = history.borrow_mut();
         history.retain(|(old_pid, old)| *old_pid != pid || unsafe { CFEqual(old.0, window) == 0 });
         history.insert(0, (pid, retained));
+        history.truncate(MAX_MRU_WINDOWS);
     });
+}
+
+#[no_mangle]
+extern "C" fn wintab_record_focus(pid: i32, window: CFTypeRef) {
+    if pid > 0 && pid != std::process::id() as i32 && !window.is_null() {
+        remember_window(pid, window);
+    }
 }
 
 fn remember_candidate(snapshot: &CandidateSnapshot, index: usize) {
@@ -596,11 +605,12 @@ fn run_switch_session(
         .rows
         .iter()
         .map(|row| {
-            std::ffi::CString::new(format!("{} — {}", row.app_name, row.title).replace('\0', "�"))
+            std::ffi::CString::new(row.title.replace('\0', "�"))
                 .expect("replacing NUL yields a valid C string")
         })
         .collect();
     let label_ptrs: Vec<_> = labels.iter().map(|label| label.as_ptr()).collect();
+    let pids: Vec<_> = snapshot.rows.iter().map(|row| row.pid).collect();
     let deadline = seconds
         .map(|seconds| std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds));
     let mut selection = crate::input::Selection::new(count, focused).unwrap();
@@ -637,7 +647,7 @@ fn run_switch_session(
         unsafe { CFRelease(tap) };
         return Err("Could not create switch event tap run-loop source".into());
     }
-    if !crate::overlay::show(&label_ptrs, context.selection.selected()) {
+    if !crate::overlay::show(&label_ptrs, &pids, context.selection.selected()) {
         unsafe {
             CFRelease(source);
             CFRelease(tap);

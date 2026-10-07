@@ -7,7 +7,12 @@ pub(super) type MenuAction = extern "C" fn(c_int, *mut c_void) -> c_int;
 pub(super) type DeferredAction = extern "C" fn(*mut c_void, c_int);
 
 unsafe extern "C" {
-    fn wintab_overlay_show(labels: *const *const c_char, count: usize, selected: isize) -> i32;
+    fn wintab_overlay_show(
+        labels: *const *const c_char,
+        pids: *const i32,
+        count: usize,
+        selected: isize,
+    ) -> i32;
     fn wintab_overlay_select(selected: isize);
     fn wintab_overlay_hide();
     fn wintab_status_run(action: MenuAction, context: *mut c_void, enabled: c_int) -> i32;
@@ -16,10 +21,11 @@ unsafe extern "C" {
     fn wintab_defer_switch(action: DeferredAction, context: *mut c_void, reverse: c_int);
 }
 
-pub fn show(labels: &[*const c_char], selected: Option<usize>) -> bool {
+pub fn show(labels: &[*const c_char], pids: &[i32], selected: Option<usize>) -> bool {
     unsafe {
         wintab_overlay_show(
             labels.as_ptr(),
+            pids.as_ptr(),
             labels.len(),
             selected.map_or(-1, |index| index as isize),
         ) != 0

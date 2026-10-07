@@ -19,7 +19,9 @@ docker compose run --rm rustfmt fmt --all        # format files
 
 GitHub Actionsの`macOS app` workflowは、Apple Silicon向けの`.app`を成果物として作成します。Actionsの成果物から`wintab-rs-macos-arm64.zip`を取得して展開してください。ビルド・テストはGitHub Actions上で行い、ローカルでは実行しません。
 
-`.app`はActionsでad-hoc署名を付けます（配布用の署名・公証ではありません）。Finderから起動するとメニューバーに`WT`が表示されます。Command+Tabで一覧を開き、最初に直前のウィンドウを選択します。Commandを離すと選択中のウィンドウへ切り替えます。メニューには有効／一時停止、プライバシーとセキュリティ設定、終了があります。
+`.app`はActionsでad-hoc署名を付けます（配布用の署名・公証ではありません）。Finderから起動するとメニューバーに`WT`が表示されます。Command+Tabでアプリアイコンを横並びにした一覧を開き、選択中ウィンドウのタイトルをUI中央下部に表示します。同じアプリの複数ウィンドウはタイトルで見分けられます。最初に直前のウィンドウを選択し、Commandを離すとそのウィンドウへ切り替えます。ウィンドウのサムネイルは取得せず、スクリーン収録権限も要求しません。メニューには有効／一時停止、プライバシーとセキュリティ設定、終了があります。
+
+常駐中はNSWorkspaceのアプリ起動・アクティブ化通知と、各アプリのAccessibilityフォーカス変更通知でウィンドウMRUを更新します。履歴はメモリ内のみで、通知を登録できないアプリは操作開始時のFocused Window取得にフォールバックします。権限がない／一時停止中は通知監視を行いません。
 
 ```sh
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --status
