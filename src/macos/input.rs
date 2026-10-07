@@ -1,6 +1,6 @@
 use super::windows::{
-    candidate_snapshot, focused_index, raise_from_list, title, window_at, window_list,
-    CandidateSnapshot,
+    candidate_snapshot, cf_string, copy_attribute, focused_index, raise_from_list, title,
+    window_at, window_list, CandidateRow, CandidateSnapshot,
 };
 use super::*;
 

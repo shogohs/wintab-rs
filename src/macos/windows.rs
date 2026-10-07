@@ -269,7 +269,7 @@ pub fn windows_count(pid: i32) -> Result<usize, String> {
         .map_err(|_| "AXWindows returned a negative count".into())
 }
 
-fn cf_string(value: &std::ffi::CStr) -> Result<OwnedCf, String> {
+pub(super) fn cf_string(value: &std::ffi::CStr) -> Result<OwnedCf, String> {
     let result =
         unsafe { CFStringCreateWithCString(ptr::null(), value.as_ptr(), K_CFSTRING_ENCODING_UTF8) };
     if result.is_null() {
@@ -279,7 +279,11 @@ fn cf_string(value: &std::ffi::CStr) -> Result<OwnedCf, String> {
     }
 }
 
-fn copy_attribute(element: CFTypeRef, attribute: CFTypeRef, name: &str) -> Result<OwnedCf, String> {
+pub(super) fn copy_attribute(
+    element: CFTypeRef,
+    attribute: CFTypeRef,
+    name: &str,
+) -> Result<OwnedCf, String> {
     let mut value = ptr::null();
     let result = unsafe { AXUIElementCopyAttributeValue(element, attribute, &mut value) };
     if result != K_AX_ERROR_SUCCESS {
