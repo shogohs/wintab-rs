@@ -1,5 +1,9 @@
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <stdatomic.h>
+
+extern NSDictionary<NSString *, NSString *> *wintab_read_dock_badges(void);
 
 static NSPanel *wintab_panel;
 static NSMutableArray<NSView *> *wintab_rows;
@@ -7,10 +11,14 @@ static NSMutableArray<NSString *> *wintab_titles;
 static NSTextField *wintab_selected_title;
 static void (*wintab_mouse_action)(NSInteger, int, void *);
 static void *wintab_mouse_context;
+static atomic_flag wintab_badge_worker = ATOMIC_FLAG_INIT;
+static NSUInteger wintab_panel_generation;
 
 @interface WintabWindowItem : NSView
 @property(nonatomic) NSInteger index;
 @property(nonatomic, strong) NSImage *icon;
+@property(nonatomic, copy) NSString *badge;
+@property(nonatomic, copy) NSString *bundleKey;
 @end
 
 @implementation WintabWindowItem
@@ -24,8 +32,28 @@ static void *wintab_mouse_context;
 }
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
-    [self.icon drawInRect:NSInsetRect(self.bounds, 4, 4)];
+    NSRect iconRect = NSInsetRect(self.bounds, 4, 4);
+    [self.icon drawInRect:iconRect];
+    if (self.badge.length == 0 || iconRect.size.width < 24) return;
+    CGFloat height = MIN(20.0, MAX(12.0, iconRect.size.height * 0.23));
+    CGFloat maxWidth = iconRect.size.width * 0.62;
+    CGFloat fontSize = MIN(12.0, MAX(7.0, height * 0.62));
+    NSFont *font = [NSFont boldSystemFontOfSize:fontSize];
+    NSString *text = self.badge;
+    NSMutableParagraphStyle *paragraph = [NSMutableParagraphStyle new];
+    paragraph.alignment = NSTextAlignmentCenter;
+    paragraph.lineBreakMode = NSLineBreakByTruncatingTail;
+    NSDictionary *attributes = @{ NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.whiteColor, NSParagraphStyleAttributeName: paragraph };
+    CGFloat width = MIN(maxWidth, [text sizeWithAttributes:@{ NSFontAttributeName: font }].width + 10.0);
+    NSRect badgeRect = NSMakeRect(NSMaxX(iconRect) - width, NSMaxY(iconRect) - height, width, height);
+    [[NSColor colorWithRed:0.90 green:0.12 blue:0.16 alpha:1.0] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:badgeRect xRadius:height / 2.0 yRadius:height / 2.0] fill];
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(badgeRect);
+    [text drawInRect:NSInsetRect(badgeRect, 5.0, 1.0) withAttributes:attributes];
+    [NSGraphicsContext restoreGraphicsState];
 }
+
 - (void)mouseEntered:(NSEvent *)event {
     if (wintab_mouse_action != NULL) wintab_mouse_action(self.index, 0, wintab_mouse_context);
 }
@@ -34,6 +62,27 @@ static void *wintab_mouse_context;
 }
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
 @end
+
+static void apply_dock_badges(NSDictionary<NSString *, NSString *> *badges, NSUInteger generation) {
+    if (wintab_panel == nil || generation != wintab_panel_generation) return;
+    for (WintabWindowItem *row in wintab_rows) {
+        row.badge = row.bundleKey == nil ? nil : badges[row.bundleKey];
+        [row setNeedsDisplay:YES];
+    }
+    [wintab_panel displayIfNeeded];
+}
+
+static void start_dock_badge_read(NSUInteger generation) {
+    if (atomic_flag_test_and_set_explicit(&wintab_badge_worker, memory_order_acquire)) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDictionary *badges = [wintab_read_dock_badges() copy];
+        atomic_flag_clear_explicit(&wintab_badge_worker, memory_order_release);
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopDefaultMode, ^{
+            apply_dock_badges(badges, generation);
+        });
+        CFRunLoopWakeUp(CFRunLoopGetMain());
+    });
+}
 
 int wintab_overlay_handle_click(void) {
     if (wintab_panel == nil) return -1;
@@ -67,6 +116,7 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
                         void (*action)(NSInteger, int, void *), void *context) {
     @autoreleasepool {
         if (count == 0) return 0;
+        wintab_panel_generation++;
         [NSApplication sharedApplication];
         wintab_mouse_action = action;
         wintab_mouse_context = context;
@@ -101,6 +151,7 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         wintab_rows = [NSMutableArray arrayWithCapacity:count];
         wintab_titles = [NSMutableArray arrayWithCapacity:count];
         NSMutableDictionary<NSNumber *, NSImage *> *icons = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSNumber *, NSString *> *bundleKeys = [NSMutableDictionary dictionary];
         for (NSUInteger index = 0; index < count; index++) {
             CGFloat x = (width - ((CGFloat)count * item_stride - item_spacing)) / 2.0 + (CGFloat)index * item_stride;
             WintabWindowItem *row = [[WintabWindowItem alloc] initWithFrame:NSMakeRect(x, 58.0, row_size, row_size)];
@@ -108,9 +159,16 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
             row.layer.cornerRadius = 12.0;
             row.index = (NSInteger)index;
             NSNumber *pid = @(pids[index]);
+            NSRunningApplication *runningApp = [NSRunningApplication runningApplicationWithProcessIdentifier:pids[index]];
+            NSString *bundleKey = bundleKeys[pid];
+            if (bundleKey == nil && runningApp.bundleURL != nil) {
+                bundleKey = runningApp.bundleURL.URLByStandardizingPath.path;
+                if (bundleKey != nil) bundleKeys[pid] = bundleKey;
+            }
+            row.bundleKey = bundleKey;
             NSImage *icon = icons[pid];
             if (icon == nil) {
-                icon = [NSRunningApplication runningApplicationWithProcessIdentifier:pids[index]].icon;
+                icon = runningApp.icon;
                 if (icon != nil) icons[pid] = icon;
             }
             if (icon == nil) icon = [NSImage imageNamed:NSImageNameApplicationIcon];
@@ -141,6 +199,7 @@ int wintab_overlay_show(const char *const *labels, const int *pids, size_t count
         set_selected_row(selected);
         [wintab_panel orderFrontRegardless];
         [wintab_panel displayIfNeeded];
+        start_dock_badge_read(wintab_panel_generation);
         return 1;
     }
 }
@@ -153,6 +212,7 @@ void wintab_overlay_select(NSInteger selected) {
 
 void wintab_overlay_hide(void) {
     @autoreleasepool {
+        wintab_panel_generation++;
         [wintab_panel orderOut:nil];
         wintab_panel = nil;
         wintab_rows = nil;

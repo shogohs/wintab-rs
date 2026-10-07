@@ -19,6 +19,10 @@ jobs:
           components: rustfmt
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Test Dock badge URL handling
+        run: |
+          clang -fobjc-arc -framework AppKit -framework ApplicationServices tests/dock_badges.m -o /tmp/wintab-dock-badges-test
+          /tmp/wintab-dock-badges-test
       - name: Check Apple Silicon target
         run: cargo check --all-targets --target aarch64-apple-darwin
       - name: Test Apple Silicon target

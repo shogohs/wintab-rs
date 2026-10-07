@@ -5,7 +5,7 @@ fn main() {
         return;
     }
     let output_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    for source in ["overlay", "status_item", "focus_tracking"] {
+    for source in ["overlay", "dock_badges", "status_item", "focus_tracking"] {
         let input = format!("src/{source}.m");
         let output = output_dir.join(format!("{source}.o"));
         let status = Command::new("clang")
