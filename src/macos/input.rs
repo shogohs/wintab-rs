@@ -3,6 +3,176 @@ use super::windows::{
     window_at, window_list, CandidateRow, CandidateSnapshot,
 };
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static RESIDENT_QUIT: AtomicBool = AtomicBool::new(false);
+
+struct ResidentContext {
+    tap: CFMachPortRef,
+    enabled: bool,
+    busy: bool,
+    permitted: bool,
+}
+
+extern "C" fn resident_event(
+    _proxy: CGEventTapProxy,
+    kind: CGEventType,
+    event: CGEventRef,
+    user_info: *mut c_void,
+) -> CGEventRef {
+    if user_info.is_null() {
+        return event;
+    }
+    let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
+    if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT || kind == K_CG_EVENT_TAP_DISABLED_BY_USER {
+        if !context.busy {
+            context.enabled = false;
+        }
+        return event;
+    }
+    if kind != K_CG_EVENT_KEY_DOWN || event.is_null() {
+        return event;
+    }
+    if !context.enabled || context.busy {
+        return event;
+    }
+    let flags = unsafe { CGEventGetFlags(event) };
+    let key = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) };
+    if key != 48
+        || flags & K_CG_EVENT_FLAG_MASK_COMMAND == 0
+        || flags & ((1 << 18) | (1 << 19)) != 0
+    {
+        return event;
+    }
+    context.busy = true;
+    unsafe { CGEventTapEnable(context.tap, false) };
+    crate::overlay::defer_switch(begin_resident_switch, user_info, flags & (1 << 17) != 0);
+    ptr::null_mut()
+}
+
+extern "C" fn resident_menu_action(action: i32, user_info: *mut c_void) -> i32 {
+    if user_info.is_null() {
+        return 0;
+    }
+    let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
+    match action {
+        0 => {
+            if !context.permitted {
+                return 0;
+            }
+            context.enabled = !context.enabled;
+            unsafe { CGEventTapEnable(context.tap, context.enabled && !context.busy) };
+            context.enabled as i32
+        }
+        1 => {
+            crate::overlay::open_privacy_settings();
+            context.enabled as i32
+        }
+        2 => {
+            RESIDENT_QUIT.store(true, Ordering::Relaxed);
+            if !context.tap.is_null() {
+                unsafe { CGEventTapEnable(context.tap, false) };
+            }
+            0
+        }
+        _ => context.enabled as i32,
+    }
+}
+
+extern "C" fn begin_resident_switch(user_info: *mut c_void, reverse: i32) {
+    if user_info.is_null() {
+        return;
+    }
+    let context = unsafe { &mut *user_info.cast::<ResidentContext>() };
+    if context.enabled && context.permitted && !RESIDENT_QUIT.load(Ordering::Relaxed) {
+        let result = candidate_snapshot().and_then(|snapshot| {
+            let focused = focused_candidate(&snapshot);
+            run_switch_session(
+                snapshot,
+                focused,
+                Some(10.0),
+                Some(if reverse == 0 {
+                    crate::input::Direction::Forward
+                } else {
+                    crate::input::Direction::Reverse
+                }),
+            )
+        });
+        if let Err(error) = result {
+            eprintln!("wintab-rs: {error}");
+        }
+    }
+    context.busy = false;
+    unsafe {
+        CGEventTapEnable(
+            context.tap,
+            context.enabled && !RESIDENT_QUIT.load(Ordering::Relaxed),
+        )
+    };
+}
+
+pub fn resident() -> Result<(), String> {
+    RESIDENT_QUIT.store(false, Ordering::Relaxed);
+    let (ax, input_monitoring) = startup_permissions()?;
+    let mut context = ResidentContext {
+        tap: ptr::null_mut(),
+        enabled: ax && input_monitoring,
+        busy: false,
+        permitted: ax && input_monitoring,
+    };
+    let mut source = ptr::null_mut();
+    if context.permitted {
+        let mask = 1_u64 << K_CG_EVENT_KEY_DOWN;
+        context.tap = unsafe {
+            CGEventTapCreate(
+                K_CG_SESSION_EVENT_TAP,
+                K_CG_HEAD_INSERT_EVENT_TAP,
+                0,
+                mask,
+                resident_event,
+                (&mut context as *mut ResidentContext).cast(),
+            )
+        };
+        if context.tap.is_null() {
+            context.enabled = false;
+            context.permitted = false;
+            eprintln!("wintab-rs: could not create the Command+Tab event tap");
+        } else {
+            source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), context.tap, 0) };
+            if source.is_null() {
+                unsafe { CFRelease(context.tap) };
+                context.tap = ptr::null_mut();
+                context.enabled = false;
+                context.permitted = false;
+                eprintln!("wintab-rs: could not create resident event tap run-loop source");
+            } else {
+                unsafe {
+                    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
+                    CGEventTapEnable(context.tap, true);
+                }
+            }
+        }
+    }
+    let ran = crate::overlay::status_run(
+        resident_menu_action,
+        (&mut context as *mut ResidentContext).cast(),
+        context.enabled,
+    );
+    unsafe {
+        if !source.is_null() {
+            CGEventTapEnable(context.tap, false);
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
+            CFMachPortInvalidate(context.tap);
+            CFRelease(source);
+            CFRelease(context.tap);
+        }
+    }
+    if ran {
+        Ok(())
+    } else {
+        Err("Could not create the wintab-rs menu bar item".into())
+    }
+}
 
 #[derive(Default)]
 struct TapStats {
@@ -177,7 +347,7 @@ pub fn capture(seconds: f64) -> Result<(), String> {
 struct SwitchContext {
     input: crate::input::CaptureState,
     selection: crate::input::Selection,
-    deadline: std::time::Instant,
+    deadline: Option<std::time::Instant>,
 }
 
 extern "C" fn switch_event(
@@ -195,7 +365,9 @@ extern "C" fn switch_event(
         let output = context.input.handle(decoded);
         context.selection.disable();
         output
-    } else if std::time::Instant::now() >= context.deadline
+    } else if context
+        .deadline
+        .is_some_and(|deadline| std::time::Instant::now() >= deadline)
         && (!context.selection.terminal() || context.input.has_owned_keys())
     {
         context.selection.cancel();
@@ -304,6 +476,15 @@ fn run_switch(
     focused: Option<usize>,
     seconds: f64,
 ) -> Result<(), String> {
+    run_switch_session(snapshot, focused, Some(seconds), None)
+}
+
+fn run_switch_session(
+    snapshot: CandidateSnapshot,
+    focused: Option<usize>,
+    seconds: Option<f64>,
+    initial: Option<crate::input::Direction>,
+) -> Result<(), String> {
     let count = snapshot.rows.len();
     if count == 0 {
         return Err(
@@ -331,10 +512,19 @@ fn run_switch(
         })
         .collect();
     let label_ptrs: Vec<_> = labels.iter().map(|label| label.as_ptr()).collect();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
+    let deadline = seconds
+        .map(|seconds| std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds));
+    let mut selection = crate::input::Selection::new(count, focused).unwrap();
+    if let Some(direction) = initial {
+        selection.step(direction);
+    }
     let mut context = SwitchContext {
-        input: crate::input::CaptureState::default(),
-        selection: crate::input::Selection::new(count, focused).unwrap(),
+        input: if initial.is_some() {
+            crate::input::CaptureState::begin_with_tab_down()
+        } else {
+            crate::input::CaptureState::default()
+        },
+        selection,
         deadline,
     };
     let mask = (1_u64 << K_CG_EVENT_KEY_DOWN)
@@ -358,7 +548,7 @@ fn run_switch(
         unsafe { CFRelease(tap) };
         return Err("Could not create switch event tap run-loop source".into());
     }
-    if !crate::overlay::show(&label_ptrs, focused) {
+    if !crate::overlay::show(&label_ptrs, context.selection.selected()) {
         unsafe {
             CFRelease(source);
             CFRelease(tap);
@@ -370,13 +560,17 @@ fn run_switch(
         let mode = kCFRunLoopDefaultMode;
         CFRunLoopAddSource(current, source, mode);
         CGEventTapEnable(tap, true);
-        while !context.selection.terminal() || context.input.has_owned_keys() {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
+        while !RESIDENT_QUIT.load(Ordering::Relaxed)
+            && (!context.selection.terminal() || context.input.has_owned_keys())
+        {
+            let wait = deadline
+                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap_or(std::time::Duration::from_millis(100));
+            if wait.is_zero() {
                 context.selection.cancel();
                 break;
             }
-            CFRunLoopRunInMode(mode, remaining.as_secs_f64().min(0.1), false);
+            CFRunLoopRunInMode(mode, wait.as_secs_f64().min(0.1), false);
             crate::overlay::select(context.selection.selected());
         }
         CGEventTapEnable(tap, false);
@@ -386,7 +580,9 @@ fn run_switch(
         CFRelease(tap);
     }
     crate::overlay::hide();
-    if std::time::Instant::now() >= deadline {
+    if RESIDENT_QUIT.load(Ordering::Relaxed)
+        || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    {
         context.selection.cancel();
     }
     let selected = context.selection.take_commit();

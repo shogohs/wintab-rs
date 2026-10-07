@@ -1,4 +1,4 @@
-name: macOS PoC
+name: macOS app
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
         run: cargo test --target aarch64-apple-darwin
       - name: Build release binary
         run: cargo build --release --target aarch64-apple-darwin
-      - name: Package diagnostic app
+      - name: Package macOS app
         run: |
           APP="dist/wintab-rs.app"
           mkdir -p "$APP/Contents/MacOS"

@@ -219,5 +219,5 @@ pub fn startup_permissions() -> Result<(bool, bool), String> {
 mod input;
 mod windows;
 
-pub use input::{capture, list_candidates, listen, switch_global, switch_pid};
+pub use input::{capture, list_candidates, listen, resident, switch_global, switch_pid};
 pub use windows::{list_windows, raise_window, windows_count};

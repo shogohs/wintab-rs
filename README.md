@@ -15,14 +15,14 @@ docker compose run --rm rustfmt                 # format check
 docker compose run --rm rustfmt fmt --all        # format files
 ```
 
-## 診断PoCと次段階の実証
+## 常駐アプリと診断コマンド
 
-GitHub Actionsの`macOS PoC` workflowは、Apple Silicon向けの`.app`を成果物として作成します。Actionsの成果物から`wintab-rs-macos-arm64.zip`を取得して展開してください。ビルド・テストはGitHub Actions上で行い、ローカルでは実行しません。
+GitHub Actionsの`macOS app` workflowは、Apple Silicon向けの`.app`を成果物として作成します。Actionsの成果物から`wintab-rs-macos-arm64.zip`を取得して展開してください。ビルド・テストはGitHub Actions上で行い、ローカルでは実行しません。
 
-この段階の`.app`は実行ファイルを束ねる最小パッケージで、ActionsではPoC用のad-hoc署名を付けます（配布用の署名・公証ではありません）。診断メッセージを確認できるよう、Finderで開くのではなくターミナルから実行します。
+`.app`はActionsでad-hoc署名を付けます（配布用の署名・公証ではありません）。Finderから起動するとメニューバーに`WT`が表示されます。Command+Tabで一覧を開き、Commandを離すと選択中のウィンドウへ切り替えます。メニューには有効／一時停止、プライバシーとセキュリティ設定、終了があります。
 
 ```sh
-"/path/to/wintab-rs.app/Contents/MacOS/wintab-rs"
+"/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --status
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --pid 1234
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --tap-seconds 5
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --capture-seconds 5
@@ -33,7 +33,7 @@ GitHub Actionsの`macOS PoC` workflowは、Apple Silicon向けの`.app`を成果
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --switch --seconds 10
 ```
 
-有効な引数で起動すると、未許可のAccessibility権限を`AXIsProcessTrustedWithOptions`（`kAXTrustedCheckOptionPrompt = true`）、入力監視権限を`CGRequestListenEventAccess`で要求し、現在のプロセスに対する許可状態を表示します。Accessibilityの要求は非同期なので、要求直後の未許可表示は拒否の確定ではありません。このCLIは権限設定を待って常駐せず、実行に必要な権限がまだなければ診断を開始せずに案内を表示し、正常終了します。[Apple: Accessibility権限要求](https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions)、[入力監視権限要求](https://developer.apple.com/documentation/coregraphics/cgrequestlisteneventaccess())
+引数なしの起動では未許可のAccessibility権限を`AXIsProcessTrustedWithOptions`（`kAXTrustedCheckOptionPrompt = true`）、入力監視権限を`CGRequestListenEventAccess`で要求してメニューバーに常駐します。権限が不足している間は切り替えを無効にし、メニューから設定画面を開けます。`--status`または診断引数を付けた起動では現在の許可状態を表示します。Accessibilityの要求は非同期なので、要求直後の未許可表示は拒否の確定ではありません。[Apple: Accessibility権限要求](https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions)、[入力監視権限要求](https://developer.apple.com/documentation/coregraphics/cgrequestlisteneventaccess())
 
 システムの案内に従い、「システム設定」>「プライバシーとセキュリティ」のAccessibility（アクセシビリティ）と「入力監視」で許可してから、同じ`.app`を再起動してください。既にONでも未許可と表示される場合は、診断に表示された実行ファイルの場所と設定対象の`.app`が一致するか確認し、現在の`.app`を設定に登録し直してください。成果物の差し替えによるad-hoc署名の変更や起動経路を含め、TCCが実際に許可する対象は実機確認が必要です。
 
@@ -51,4 +51,4 @@ GitHub Actionsの`macOS PoC` workflowは、Apple Silicon向けの`.app`を成果
 
 `--switch --seconds N`はその保持済み候補で、単一PIDモードと同じ1セッションの切り替えを行います。候補はターミナルとネイティブパネルに表示します。取得失敗・非対応・除外の件数と理由を診断に表示します。`AXModal=false`を確認できない標準ウィンドウも保守的に除外し、未対応・読み取り失敗のAXModal件数を別に表示します。CG一覧に現れないアプリやAX非対応による欠落、全Space・フルスクリーン・最小化・非表示の完全性は未確認です。画面収録権限を要求するモードではありません。
 
-権限、AXウィンドウ取得、listen-onlyでのCommand+Tab検出は既存のActions成果物を実機で確認しました。captureの正方向・commitカウント、Chromeの2ウィンドウへのAXRaise・前面化・FocusedWindow属性の一致、単一PIDの`--switch-pid`に加え、PID指定なしモードで複数のChromeウィンドウと別アプリ間の切り替えが動作したとの報告を受けています。ユーザーからパネル表示と選択行移動の動作OK、Escape取消は不要との判断を受けています。個別の一般キー取消・期限境界・終了後の標準Command+Tab復帰、プロファイル識別、別Space・フルスクリーン等をすべて検証済みとは扱いません。常駐UIと要件全体は未完成です。
+権限、AXウィンドウ取得、listen-onlyでのCommand+Tab検出は既存のActions成果物を実機で確認しました。captureの正方向・commitカウント、Chromeの2ウィンドウへのAXRaise・前面化・FocusedWindow属性の一致、単一PIDの`--switch-pid`に加え、PID指定なしモードで複数のChromeウィンドウと別アプリ間の切り替えが動作したとの報告を受けています。ユーザーからパネル表示と選択行移動の動作OK、Escape取消は不要との判断を受けています。個別の一般キー取消・期限境界・終了後の標準Command+Tab復帰、プロファイル識別、別Space・フルスクリーン等をすべて検証済みとは扱いません。常駐メニューとCommand+Tab連携は実装中で、今回の変更はActionsビルドと実機確認待ちです。

@@ -49,6 +49,14 @@ pub struct CaptureState {
 }
 
 impl CaptureState {
+    pub fn begin_with_tab_down() -> Self {
+        Self {
+            active: true,
+            owned_tab_down: true,
+            ..Self::default()
+        }
+    }
+
     pub fn handle(&mut self, event: Event) -> Output {
         let mut suppress = false;
         let mut end = None;
@@ -243,6 +251,16 @@ mod tests {
         assert!(!released.suppress);
         assert_eq!(s.committed, 1);
         assert!(s.handle(Event::KeyUp { key: 48 }).suppress);
+    }
+
+    #[test]
+    fn intercepted_start_tab_waits_for_command_release() {
+        let mut state = CaptureState::begin_with_tab_down();
+        assert!(state.handle(Event::KeyUp { key: 48 }).suppress);
+        assert_eq!(
+            state.handle(Event::FlagsChanged { flags: 0 }).end,
+            Some(End::Commit)
+        );
     }
 
     #[test]

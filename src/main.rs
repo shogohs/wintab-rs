@@ -27,6 +27,7 @@ fn run() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         enum Command {
+            Resident,
             Status,
             Pid(i32),
             Tap(f64),
@@ -38,7 +39,8 @@ fn run() -> Result<(), String> {
             Switch(f64),
         }
         let command = match args.as_slice() {
-            [] => Command::Status,
+            [] => Command::Resident,
+            [flag] if flag == "--status" => Command::Status,
             [flag, pid] if flag == "--pid" => {
                 let pid: i32 = pid.parse().map_err(|_| "PID must be a positive integer")?;
                 if pid <= 0 {
@@ -70,8 +72,12 @@ fn run() -> Result<(), String> {
             }
             _ => return Err("Usage: wintab-rs [--pid PID | --list-windows PID | --raise-window PID INDEX | --tap-seconds SECONDS | --capture-seconds SECONDS | --switch-pid PID --seconds N | --list-candidates | --switch --seconds N]".into()),
         };
+        if matches!(&command, Command::Resident) {
+            return macos::resident();
+        }
         let (ax, input_monitoring) = macos::startup_permissions()?;
         match command {
+            Command::Resident => unreachable!(),
             Command::Status => {
                 println!("wintab-rs phase 1 diagnostic PoC");
                 println!(
