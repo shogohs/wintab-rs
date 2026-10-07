@@ -3,6 +3,35 @@
 mod input;
 
 #[cfg(target_os = "macos")]
+mod overlay {
+    use std::ffi::c_char;
+
+    unsafe extern "C" {
+        fn wintab_overlay_show(labels: *const *const c_char, count: usize, selected: isize) -> i32;
+        fn wintab_overlay_select(selected: isize);
+        fn wintab_overlay_hide();
+    }
+
+    pub fn show(labels: &[*const c_char], selected: Option<usize>) -> bool {
+        unsafe {
+            wintab_overlay_show(
+                labels.as_ptr(),
+                labels.len(),
+                selected.map_or(-1, |index| index as isize),
+            ) != 0
+        }
+    }
+
+    pub fn select(selected: Option<usize>) {
+        unsafe { wintab_overlay_select(selected.map_or(-1, |index| index as isize)) }
+    }
+
+    pub fn hide() {
+        unsafe { wintab_overlay_hide() }
+    }
+}
+
+#[cfg(target_os = "macos")]
 mod macos {
     #![allow(non_camel_case_types)]
 
@@ -1015,6 +1044,17 @@ mod macos {
         } else {
             println!("Initial focus was unavailable in this AX list; first forward Tab selects 0 and first reverse Tab selects the last window.");
         }
+        let labels: Vec<_> = snapshot
+            .rows
+            .iter()
+            .map(|row| {
+                std::ffi::CString::new(
+                    format!("{} — {}", row.app_name, row.title).replace('\0', "�"),
+                )
+                .expect("replacing NUL yields a valid C string")
+            })
+            .collect();
+        let label_ptrs: Vec<_> = labels.iter().map(|label| label.as_ptr()).collect();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
         let mut context = SwitchContext {
             input: crate::input::CaptureState::default(),
@@ -1042,6 +1082,13 @@ mod macos {
             unsafe { CFRelease(tap) };
             return Err("Could not create switch event tap run-loop source".into());
         }
+        if !crate::overlay::show(&label_ptrs, focused) {
+            unsafe {
+                CFRelease(source);
+                CFRelease(tap);
+            }
+            return Err("Could not create the window list panel".into());
+        }
         unsafe {
             let current = CFRunLoopGetCurrent();
             let mode = kCFRunLoopDefaultMode;
@@ -1054,6 +1101,7 @@ mod macos {
                     break;
                 }
                 CFRunLoopRunInMode(mode, remaining.as_secs_f64().min(0.1), false);
+                crate::overlay::select(context.selection.selected());
             }
             CGEventTapEnable(tap, false);
             CFRunLoopRemoveSource(current, source, mode);
@@ -1061,6 +1109,7 @@ mod macos {
             CFRelease(source);
             CFRelease(tap);
         }
+        crate::overlay::hide();
         if std::time::Instant::now() >= deadline {
             context.selection.cancel();
         }

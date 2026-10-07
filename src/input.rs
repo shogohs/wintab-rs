@@ -222,6 +222,10 @@ impl Selection {
     pub fn terminal(&self) -> bool {
         self.end.is_some()
     }
+
+    pub fn selected(&self) -> Option<usize> {
+        self.cursor
+    }
 }
 
 #[cfg(test)]
