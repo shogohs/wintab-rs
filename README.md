@@ -6,6 +6,15 @@ Window-level Cmd+Tab switcher for macOS built with Rust.
 - [機能要件](docs/requirements.md)
 - [開発計画](docs/plan.md)
 
+## Rust formatter
+
+Docker ComposeでRust 1.99.0のrustfmtを使います。初回はイメージをビルドします。
+
+```sh
+docker compose run --rm rustfmt                 # format check
+docker compose run --rm rustfmt fmt --all        # format files
+```
+
 ## 診断PoCと次段階の実証
 
 GitHub Actionsの`macOS PoC` workflowは、Apple Silicon向けの`.app`を成果物として作成します。Actionsの成果物から`wintab-rs-macos-arm64.zip`を取得して展開してください。ビルド・テストはGitHub Actions上で行い、ローカルでは実行しません。

@@ -1,0 +1,7 @@
+services:
+  rustfmt:
+    build:
+      context: docker/rustfmt
+    volumes:
+      - .:/work
+    command: ["fmt", "--all", "--", "--check"]
