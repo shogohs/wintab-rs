@@ -42,7 +42,11 @@ impl CaptureState {
                 self.end = Some(End::Disabled);
                 end = self.end;
             }
-            Event::KeyDown { key: 48, flags, repeat } => {
+            Event::KeyDown {
+                key: 48,
+                flags,
+                repeat,
+            } => {
                 if self.owned_tab_down {
                     suppress = true;
                 } else if !repeat && flags & CMD != 0 && flags & (CTRL | OPTION) == 0 {
@@ -62,7 +66,11 @@ impl CaptureState {
                 self.owned_tab_down = false;
                 suppress = true;
             }
-            Event::KeyDown { key: 53, flags: _, repeat } if self.active && !repeat => {
+            Event::KeyDown {
+                key: 53,
+                flags: _,
+                repeat,
+            } if self.active && !repeat => {
                 self.owned_escape_down = true;
                 self.active = false;
                 self.end = Some(End::Cancel);
@@ -148,7 +156,10 @@ mod tests {
         let mut s = CaptureState::default();
         s.handle(down(48, CMD, false));
         assert_eq!(s.handle(Event::FlagsChanged { flags: CMD }).end, None);
-        assert_eq!(s.handle(Event::FlagsChanged { flags: 0 }).end, Some(End::Commit));
+        assert_eq!(
+            s.handle(Event::FlagsChanged { flags: 0 }).end,
+            Some(End::Commit)
+        );
     }
 
     #[test]

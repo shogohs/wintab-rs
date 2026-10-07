@@ -100,7 +100,12 @@ mod macos {
         fn CFArrayGetCount(array: CFTypeRef) -> CFIndex;
         fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex) -> CFTypeRef;
         fn CFStringGetTypeID() -> usize;
-        fn CFStringGetCString(value: CFStringRef, buffer: *mut i8, size: CFIndex, encoding: u32) -> u8;
+        fn CFStringGetCString(
+            value: CFStringRef,
+            buffer: *mut i8,
+            size: CFIndex,
+            encoding: u32,
+        ) -> u8;
         fn CFBooleanGetTypeID() -> usize;
         fn CFBooleanGetValue(value: CFTypeRef) -> u8;
         fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> u8;
@@ -257,7 +262,11 @@ mod macos {
         }
     }
 
-    fn copy_attribute(element: CFTypeRef, attribute: CFTypeRef, name: &str) -> Result<OwnedCf, String> {
+    fn copy_attribute(
+        element: CFTypeRef,
+        attribute: CFTypeRef,
+        name: &str,
+    ) -> Result<OwnedCf, String> {
         let mut value = ptr::null();
         let result = unsafe { AXUIElementCopyAttributeValue(element, attribute, &mut value) };
         if result != K_AX_ERROR_SUCCESS {
@@ -282,16 +291,30 @@ mod macos {
     }
 
     fn title(window: CFTypeRef) -> String {
-        let Ok(attribute) = cf_string(c"AXTitle") else { return String::new() };
-        let Ok(value) = copy_attribute(window, attribute.0, "AXTitle") else { return String::new() };
+        let Ok(attribute) = cf_string(c"AXTitle") else {
+            return String::new();
+        };
+        let Ok(value) = copy_attribute(window, attribute.0, "AXTitle") else {
+            return String::new();
+        };
         if unsafe { CFGetTypeID(value.0) } != unsafe { CFStringGetTypeID() } {
             return String::new();
         }
         let mut buffer = [0i8; 2048];
-        if unsafe { CFStringGetCString(value.0, buffer.as_mut_ptr(), buffer.len() as CFIndex, K_CFSTRING_ENCODING_UTF8) } == 0 {
+        if unsafe {
+            CFStringGetCString(
+                value.0,
+                buffer.as_mut_ptr(),
+                buffer.len() as CFIndex,
+                K_CFSTRING_ENCODING_UTF8,
+            )
+        } == 0
+        {
             return "<title unavailable or too long>".into();
         }
-        unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().into_owned()
+        unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
     }
 
     pub fn list_windows(pid: i32) -> Result<(), String> {
@@ -303,7 +326,9 @@ mod macos {
             let window = window_at(&list, index)?;
             let timeout = unsafe { AXUIElementSetMessagingTimeout(window, 1.0) };
             if timeout != K_AX_ERROR_SUCCESS {
-                return Err(format!("Could not set AX timeout for window {index} (AXError {timeout})"));
+                return Err(format!(
+                    "Could not set AX timeout for window {index} (AXError {timeout})"
+                ));
             }
             println!("{index}: {:?}", title(window));
         }
@@ -314,14 +339,27 @@ mod macos {
         let attribute = cf_string(name)?;
         let mut settable = 0;
         let result = AXUIElementIsAttributeSettable(element, attribute.0, &mut settable);
-        if result == K_AX_ERROR_SUCCESS { Ok(settable != 0) } else { Err(format!("Could not inspect {name:?} (AXError {result})")) }
+        if result == K_AX_ERROR_SUCCESS {
+            Ok(settable != 0)
+        } else {
+            Err(format!("Could not inspect {name:?} (AXError {result})"))
+        }
     }
 
-    unsafe fn set_true_if_supported(element: CFTypeRef, name: &std::ffi::CStr) -> Result<bool, String> {
-        if !is_settable(element, name)? { return Ok(false); }
+    unsafe fn set_true_if_supported(
+        element: CFTypeRef,
+        name: &std::ffi::CStr,
+    ) -> Result<bool, String> {
+        if !is_settable(element, name)? {
+            return Ok(false);
+        }
         let attribute = cf_string(name)?;
         let result = AXUIElementSetAttributeValue(element, attribute.0, kCFBooleanTrue);
-        if result == K_AX_ERROR_SUCCESS { Ok(true) } else { Err(format!("Could not set {name:?} (AXError {result})")) }
+        if result == K_AX_ERROR_SUCCESS {
+            Ok(true)
+        } else {
+            Err(format!("Could not set {name:?} (AXError {result})"))
+        }
     }
 
     pub fn raise_window(pid: i32, index: usize) -> Result<(), String> {
@@ -329,7 +367,9 @@ mod macos {
         let window = window_at(&list, index)?;
         let timeout = unsafe { AXUIElementSetMessagingTimeout(window, 1.0) };
         if timeout != K_AX_ERROR_SUCCESS {
-            return Err(format!("Could not set AX timeout for window {index} (AXError {timeout})"));
+            return Err(format!(
+                "Could not set AX timeout for window {index} (AXError {timeout})"
+            ));
         }
         let restored = unsafe { set_false_if_true(window, c"AXMinimized")? };
         let app_hidden = unsafe { set_false_if_true(list.app.0, c"AXHidden")? };
@@ -339,7 +379,9 @@ mod macos {
         }
         let action = cf_string(c"AXRaise")?;
         let action_result = unsafe { AXUIElementPerformAction(window, action.0) };
-        if action_result != K_AX_ERROR_SUCCESS { return Err(format!("AXRaise failed (AXError {action_result})")); }
+        if action_result != K_AX_ERROR_SUCCESS {
+            return Err(format!("AXRaise failed (AXError {action_result})"));
+        }
         let _ = unsafe { set_true_if_supported(window, c"AXMain")? };
         let _ = unsafe { set_true_if_supported(window, c"AXFocused")? };
         let focused_attr = cf_string(c"AXFocusedWindow")?;
@@ -360,10 +402,16 @@ mod macos {
         }
         let mut settable = 0;
         let result = AXUIElementIsAttributeSettable(element, attribute.0, &mut settable);
-        if result != K_AX_ERROR_SUCCESS { return Err(format!("Could not inspect {name:?} (AXError {result})")); }
-        if settable == 0 { return Err(format!("{name:?} is true but not settable")); }
+        if result != K_AX_ERROR_SUCCESS {
+            return Err(format!("Could not inspect {name:?} (AXError {result})"));
+        }
+        if settable == 0 {
+            return Err(format!("{name:?} is true but not settable"));
+        }
         let result = AXUIElementSetAttributeValue(element, attribute.0, kCFBooleanFalse);
-        if result != K_AX_ERROR_SUCCESS { return Err(format!("Could not clear {name:?} (AXError {result})")); }
+        if result != K_AX_ERROR_SUCCESS {
+            return Err(format!("Could not clear {name:?} (AXError {result})"));
+        }
         Ok(true)
     }
 
@@ -464,20 +512,29 @@ mod macos {
         } else if event.is_null() {
             crate::input::Event::Other
         } else if kind == K_CG_EVENT_KEY_DOWN {
-            let key = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
+            let key =
+                unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
             let flags = unsafe { CGEventGetFlags(event) };
-            let repeat = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT) } != 0;
+            let repeat =
+                unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT) } != 0;
             crate::input::Event::KeyDown { key, flags, repeat }
         } else if kind == K_CG_EVENT_KEY_UP {
-            let key = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
+            let key =
+                unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
             crate::input::Event::KeyUp { key }
         } else if kind == K_CG_EVENT_FLAGS_CHANGED {
-            crate::input::Event::FlagsChanged { flags: unsafe { CGEventGetFlags(event) } }
+            crate::input::Event::FlagsChanged {
+                flags: unsafe { CGEventGetFlags(event) },
+            }
         } else {
             crate::input::Event::Other
         };
         let output = state.handle(input);
-        if output.suppress { ptr::null_mut() } else { event }
+        if output.suppress {
+            ptr::null_mut()
+        } else {
+            event
+        }
     }
 
     pub fn capture(seconds: f64) -> Result<(), String> {
@@ -610,16 +667,22 @@ fn run() -> Result<(), String> {
                 macos::listen(seconds)
             }
             Command::Capture(seconds) => {
-                if !ax || !input_monitoring { return Ok(()); }
+                if !ax || !input_monitoring {
+                    return Ok(());
+                }
                 eprintln!("Capture suppresses Command+Tab for at most {seconds:.1}s and never switches a window. Escape cancels the current session; capture stops at the deadline.");
                 macos::capture(seconds)
             }
             Command::ListWindows(pid) => {
-                if !ax { return Ok(()); }
+                if !ax {
+                    return Ok(());
+                }
                 macos::list_windows(pid)
             }
             Command::RaiseWindow(pid, index) => {
-                if !ax { return Ok(()); }
+                if !ax {
+                    return Ok(());
+                }
                 macos::raise_window(pid, index)
             }
         }
