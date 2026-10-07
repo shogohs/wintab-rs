@@ -15,9 +15,16 @@ pub enum End {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Forward,
+    Reverse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Output {
     pub suppress: bool,
     pub end: Option<End>,
+    pub step: Option<Direction>,
 }
 
 #[derive(Default)]
@@ -36,6 +43,7 @@ impl CaptureState {
     pub fn handle(&mut self, event: Event) -> Output {
         let mut suppress = false;
         let mut end = None;
+        let mut step = None;
         match event {
             Event::Disabled => {
                 *self = Self::default();
@@ -49,7 +57,9 @@ impl CaptureState {
             } => {
                 if self.owned_tab_down {
                     suppress = true;
-                } else if !repeat && flags & CMD != 0 && flags & (CTRL | OPTION) == 0 {
+                } else if repeat {
+                    // An unpaired repeat cannot start or cancel a selection.
+                } else if flags & CMD != 0 && flags & (CTRL | OPTION) == 0 {
                     if !self.active {
                         self.active = true;
                     }
@@ -57,9 +67,16 @@ impl CaptureState {
                     suppress = true;
                     if flags & SHIFT != 0 {
                         self.reverse = self.reverse.saturating_add(1);
+                        step = Some(Direction::Reverse);
                     } else {
                         self.forward = self.forward.saturating_add(1);
+                        step = Some(Direction::Forward);
                     }
+                } else if self.active {
+                    self.active = false;
+                    self.end = Some(End::Cancel);
+                    self.cancelled = self.cancelled.saturating_add(1);
+                    end = self.end;
                 }
             }
             Event::KeyUp { key: 48 } if self.owned_tab_down => {
@@ -79,6 +96,12 @@ impl CaptureState {
                 end = self.end;
             }
             Event::KeyDown { key: 53, .. } if self.owned_escape_down => suppress = true,
+            Event::KeyDown { .. } if self.active => {
+                self.active = false;
+                self.end = Some(End::Cancel);
+                self.cancelled = self.cancelled.saturating_add(1);
+                end = self.end;
+            }
             Event::KeyUp { key: 53 } if self.owned_escape_down => {
                 self.owned_escape_down = false;
                 suppress = true;
@@ -91,7 +114,28 @@ impl CaptureState {
             }
             _ => {}
         }
-        Output { suppress, end }
+        Output { suppress, end, step }
+    }
+
+    pub fn handle_owned_tail(&mut self, event: Event) -> Output {
+        let suppress = match event {
+            Event::KeyDown { key: 48, .. } if self.owned_tab_down => true,
+            Event::KeyUp { key: 48 } if self.owned_tab_down => {
+                self.owned_tab_down = false;
+                true
+            }
+            Event::KeyDown { key: 53, .. } if self.owned_escape_down => true,
+            Event::KeyUp { key: 53 } if self.owned_escape_down => {
+                self.owned_escape_down = false;
+                true
+            }
+            _ => false,
+        };
+        Output { suppress, end: None, step: None }
+    }
+
+    pub fn has_owned_keys(&self) -> bool {
+        self.owned_tab_down || self.owned_escape_down
     }
 }
 
@@ -99,6 +143,62 @@ const CMD: u64 = 1 << 20;
 const SHIFT: u64 = 1 << 17;
 const CTRL: u64 = 1 << 18;
 const OPTION: u64 = 1 << 19;
+
+pub struct Selection {
+    count: usize,
+    cursor: Option<usize>,
+    end: Option<End>,
+    commit_taken: bool,
+}
+
+impl Selection {
+    pub fn new(count: usize, focused: Option<usize>) -> Option<Self> {
+        (count > 0).then_some(Self {
+            count,
+            cursor: focused.filter(|index| *index < count),
+            end: None,
+            commit_taken: false,
+        })
+    }
+
+    pub fn step(&mut self, direction: Direction) {
+        if self.end.is_some() || self.count == 0 { return; }
+        self.cursor = Some(match (self.cursor, direction) {
+            (Some(index), Direction::Forward) => (index + 1) % self.count,
+            (Some(0), Direction::Reverse) => self.count - 1,
+            (Some(index), Direction::Reverse) => index - 1,
+            (None, Direction::Forward) => 0,
+            (None, Direction::Reverse) => self.count - 1,
+        });
+    }
+
+    pub fn finish(&mut self, end: End) {
+        if self.end.is_none() { self.end = Some(end); }
+    }
+
+    pub fn cancel(&mut self) {
+        self.end = Some(End::Cancel);
+        self.cursor = None;
+        self.commit_taken = true;
+    }
+
+    pub fn disable(&mut self) {
+        self.end = Some(End::Disabled);
+        self.cursor = None;
+        self.commit_taken = true;
+    }
+
+    pub fn take_commit(&mut self) -> Option<usize> {
+        if self.end == Some(End::Commit) && !self.commit_taken {
+            self.commit_taken = true;
+            self.cursor
+        } else {
+            None
+        }
+    }
+
+    pub fn terminal(&self) -> bool { self.end.is_some() }
+}
 
 #[cfg(test)]
 mod tests {
@@ -172,5 +272,101 @@ mod tests {
         assert_eq!((s.forward, s.reverse), (0, 0));
         assert!(!s.handle(Event::KeyUp { key: 48 }).suppress);
         assert!(!s.handle(Event::KeyUp { key: 53 }).suppress);
+    }
+
+    #[test]
+    fn selection_handles_empty_single_and_wrapping_lists() {
+        assert!(Selection::new(0, None).is_none());
+        let mut one = Selection::new(1, Some(0)).unwrap();
+        one.step(Direction::Forward);
+        assert_eq!(one.take_commit(), None);
+        one.finish(End::Commit);
+        assert_eq!(one.take_commit(), Some(0));
+        assert_eq!(one.take_commit(), None);
+
+        let mut many = Selection::new(3, Some(1)).unwrap();
+        many.step(Direction::Forward);
+        assert_eq!(many.cursor, Some(2));
+        many.step(Direction::Forward);
+        assert_eq!(many.cursor, Some(0));
+        many.step(Direction::Reverse);
+        assert_eq!(many.cursor, Some(2));
+        many.finish(End::Commit);
+        many.step(Direction::Forward);
+        assert_eq!(many.take_commit(), Some(2));
+        assert_eq!(many.take_commit(), None);
+    }
+
+    #[test]
+    fn selection_fallback_and_terminal_states_never_commit() {
+        let mut first = Selection::new(3, Some(9)).unwrap();
+        first.step(Direction::Forward);
+        assert_eq!(first.cursor, Some(0));
+        let mut last = Selection::new(3, None).unwrap();
+        last.step(Direction::Reverse);
+        assert_eq!(last.cursor, Some(2));
+
+        let mut cancelled = Selection::new(2, None).unwrap();
+        cancelled.finish(End::Cancel);
+        cancelled.step(Direction::Forward);
+        assert_eq!(cancelled.take_commit(), None);
+        assert_eq!(cancelled.cursor, None);
+        let mut disabled = Selection::new(2, None).unwrap();
+        disabled.finish(End::Disabled);
+        assert_eq!(disabled.take_commit(), None);
+        let mut disabled_after_commit = Selection::new(2, Some(0)).unwrap();
+        disabled_after_commit.step(Direction::Forward);
+        disabled_after_commit.finish(End::Commit);
+        disabled_after_commit.disable();
+        assert_eq!(disabled_after_commit.take_commit(), None);
+        let mut timed_out_pending_commit = Selection::new(2, Some(0)).unwrap();
+        timed_out_pending_commit.step(Direction::Forward);
+        timed_out_pending_commit.finish(End::Commit);
+        timed_out_pending_commit.cancel();
+        assert_eq!(timed_out_pending_commit.take_commit(), None);
+        let timeout = Selection::new(2, None).unwrap();
+        assert_eq!(timeout.take_commit(), None);
+    }
+
+    #[test]
+    fn repeats_do_not_advance_selection() {
+        let mut state = CaptureState::default();
+        let mut selection = Selection::new(4, Some(1)).unwrap();
+        let first = state.handle(down(48, CMD, false));
+        selection.step(first.step.unwrap());
+        let repeat = state.handle(down(48, CMD, true));
+        assert!(repeat.suppress);
+        assert_eq!(repeat.step, None);
+        assert_eq!(selection.cursor, Some(2));
+    }
+
+    #[test]
+    fn terminal_owned_repeats_stay_suppressed_without_advancing() {
+        let mut state = CaptureState::default();
+        let mut selection = Selection::new(3, None).unwrap();
+        let first = state.handle(down(48, CMD, false));
+        selection.step(first.step.unwrap());
+        selection.finish(End::Commit);
+        assert!(state.handle_owned_tail(down(48, CMD, true)).suppress);
+        assert!(state.handle_owned_tail(down(48, CMD, false)).suppress);
+        assert_eq!(selection.cursor, Some(0));
+    }
+
+    #[test]
+    fn ordinary_key_and_modified_tab_cancel_but_pass_through() {
+        let mut state = CaptureState::default();
+        state.handle(down(48, CMD, false));
+        state.handle(Event::KeyUp { key: 48 });
+        let ordinary = state.handle(down(0, CMD, false));
+        assert!(!ordinary.suppress);
+        assert_eq!(ordinary.end, Some(End::Cancel));
+        assert_eq!(state.handle(Event::FlagsChanged { flags: 0 }).end, None);
+
+        let mut state = CaptureState::default();
+        state.handle(down(48, CMD, false));
+        state.handle(Event::KeyUp { key: 48 });
+        let modified = state.handle(down(48, CMD | OPTION, false));
+        assert!(!modified.suppress);
+        assert_eq!(modified.end, Some(End::Cancel));
     }
 }

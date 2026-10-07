@@ -68,7 +68,7 @@ AXのフォーカス変更通知とアプリの起動・終了・アクティブ
 
 最初の縦切りはActions成果物の生成、Accessibility権限とAX APIへのアクセス、入力を抑止しないイベントタップの診断までとする。診断用PoCは完成版の切り替えアプリではない。以下の入力抑止・個別前面化・全Space対応の実機検証が終わるまで、フェーズ1を完了扱いにしない。
 
-現状: 診断用PoCとworkflowの初期実装段階。既存のActions成果物を使った起動確認は下記に記録した。起動時に未許可のAccessibility・入力監視権限を要求する処理を追加し、現在のプロセスの許可状態と実行場所、設定後の再起動手順を表示する。今回の変更はActionsでfmt／check／test／アプリのパッケージ作成まで成功し、実機で両権限、AXウィンドウ取得、listen-onlyイベントタップの動作を確認した。通常のウィンドウ切り替え機能は未実装。
+現状: 診断用PoCはActionsでfmt／check／test／アプリのパッケージ作成まで成功し、実機で両権限、AXウィンドウ取得、listen-onlyイベントタップの動作を確認した。captureの正方向・commitカウントとChromeの2ウィンドウへのAXRaise・前面化・FocusedWindow属性の一致も確認した。入力抑止の終了後の復帰、実入力先、全Spaceでの個別前面化は未確認。単一PIDの有限時間切り替えを次の実装単位とし、通常利用の切り替えアプリはまだ完成していない。
 
 権限要求は公開APIの`AXIsProcessTrustedWithOptions`（`kAXTrustedCheckOptionPrompt = true`）と`CGRequestListenEventAccess`を使う。Accessibility要求は非同期で、その戻り値は要求時点の許可状態を示す。CLIは許可を待って常駐せず、未許可なら設定と再起動を案内する。許可を拒否されたと即断せず、設定がONでも未許可なら実行場所・登録対象・ad-hoc署名変更を確認する。[Apple: Accessibility権限要求](https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions)、[入力監視権限要求](https://developer.apple.com/documentation/coregraphics/cgrequestlisteneventaccess())
 
@@ -89,6 +89,10 @@ AXのフォーカス変更通知とアプリの起動・終了・アクティブ
 captureは通常のCommand+TabとCommand+Shift+Tab、および抑止したキー押下に対応するキー解放を扱う。キーリピートで選択を進めず、Command解放・Escape取消・タップ無効化時の状態破棄を純粋なRustの状態処理として実装する。コールバックでAX問い合わせやログ出力を行わない。期限切れ・無効化時はタップを終了し、標準入力へ戻す。capture自体は実ウィンドウを切り替えない。
 
 AXの診断は対象PIDの公開`AXWindows`配列からウィンドウ要素を取得する。INDEXはその時点の配列内の一時的な位置であり、永続的なウィンドウIDや全アプリの候補識別方式ではない。明示的なraiseだけで必要な復元・非表示解除を試し、選んだAX要素のraiseとフォーカス属性を確認する。APIの成功、フォーカス属性の一致、実際の入力先・Space遷移は区別して報告する。公開AX属性が操作に対応しない場合はエラーとし、別ウィンドウへ切り替える代替処理や非公開APIを追加しない。
+
+次の縦切りは`--switch-pid PID --seconds N`（選択入力が最大10秒、1セッション）とする。開始時に指定PIDのAXWindows配列とAX要素を保持し、その順序で正逆方向に循環する。開始時のFocusedWindowが候補内にあれば基準位置にし、確認できなければ最初の正方向で先頭、逆方向で末尾から始める。Command解放で確定した要素を一度だけraiseし、番号で候補を再取得しない。Escape・別の通常キー入力・期限切れ・タップ無効化はraiseせず終了する。通常キーは取消時にそのまま通す。抑止したキーの解放待ち中もリピートを通さず、解放が期限に間に合わなければ保留中のcommitを取り消す。0件ではタップを開始せず、1件でも安全に扱い、閉じた候補への操作失敗で別候補を選ばない。
+
+イベントコールバックは既存の入力状態処理と選択位置の更新だけに限定する。commitを受けたrunloopはタップをdisable・detach・invalidateしてからAX操作を行い、同じrunloopでAX応答を待つ間に入力タップを動かさない。コールバックの後続イベントが最初の確定位置を変更できないよう、1セッションの終了を固定する。保持した配列はAX操作の終了まで解放しない。Lunaが実装・純粋状態テスト、Solがレビューを担当する。MRU、全アプリの候補取得、全Spaceの成立、UI・常駐化はこの単位の完了に含めない。
 
 - 待機、選択中、一時停止の小さな状態機械を実装する。
 - 正逆の循環、Command解放、取消、キーリピートと左右修飾キーを扱う。
@@ -124,6 +128,8 @@ GitHub Actions上で`cargo fmt --check`、`cargo check`、`cargo test`を実行�
 
 次の実装単位では、入力状態処理のテストで通常キーの通過、正逆方向、リピート、Command解放後のTab解放、Escapeの押下・解放、両Commandの集約状態、無効化による状態破棄を確認する。CIが成功しても、標準Command+Tabの抑止・診断終了後の復帰、対象Chromeウィンドウへの実入力、別Space／フルスクリーン、最小化・非表示からの復元はActions成果物での実機確認を待つ。
 
+単一PIDの切り替えでは、0件／1件／複数件、正逆方向の循環、FocusedWindowの有無、リピート無視、取消、最初のcommit位置の固定と終了後のイベント無視をCI用テストで確認する。実機ではChromeの2ウィンドウで保持順による移動と実入力先を確認し、Escape・期限切れ・候補の消滅・操作失敗の際に元の状態と標準Command+Tabが戻ることを調べる。別Space・フルスクリーン・最小化・非表示への対応は個別に記録し、既存のAX属性一致から推測しない。
+
 ### 手動確認記録
 
 - 2026-10-07、Actions成果物を起動し、arm64のMach-O、Info.plist、ad-hoc署名を確認した。
@@ -134,7 +140,9 @@ GitHub Actions上で`cargo fmt --check`、`cargo check`、`cargo test`を実行�
 - 2026-10-07、ユーザー環境で権限要求追加後のActions成果物を起動し、`Accessibility: granted`および`Input Monitoring: granted`と表示されることを確認。その後のAX・イベントタップ確認は下記に記録する。
 - 2026-10-07、`--tap-seconds 10`で10秒間のlisten-onlyイベントタップが起動し、Command+Tabのkeydownを4回検出。入力を通したまま検出できた。
 - 2026-10-07、`--pid <PID>`で対象アプリのAXウィンドウを1件取得。PIDは環境固有のため記録しない。
-- 実際の候補一覧表示、選択操作、個別ウィンドウの前面化を含む切り替えGUI動作は未確認。切り替え機能自体もまだ実装されていない。
+- 2026-10-07、Chromeの2ウィンドウを`--list-windows`で列挙し、`--raise-window`でそれぞれを指定。両方でAXRaise・アプリ前面化が受け付けられ、FocusedWindow属性の一致を確認した。AXRaise後にAXWindows配列の順序が変わるため、コマンド間でordinal indexを再利用できない。切り替え実装では選択開始時の候補配列とAX要素を保持し、番号で再解決しない。
+- 2026-10-07、ユーザーからcaptureのforward・commitカウントが記録され、正常に動作していそうとの報告を受けた。終了後の標準Command+Tab復帰やraise後の実入力先を明示的に確認した報告ではないため、そこは未確認のままとする。
+- 単一PIDの切り替えモードによる選択・実入力先の確認は未実施。候補一覧UI、全アプリとMRUを含む通常利用の切り替え機能はまだ実装されていない。
 
 ## 5. 追加判断が必要になる条件
 

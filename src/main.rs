@@ -364,6 +364,10 @@ mod macos {
 
     pub fn raise_window(pid: i32, index: usize) -> Result<(), String> {
         let list = window_list(pid)?;
+        raise_from_list(&list, index)
+    }
+
+    fn raise_from_list(list: &WindowList, index: usize) -> Result<(), String> {
         let window = window_at(&list, index)?;
         let timeout = unsafe { AXUIElementSetMessagingTimeout(window, 1.0) };
         if timeout != K_AX_ERROR_SUCCESS {
@@ -389,6 +393,15 @@ mod macos {
         let focus_verified = focused.is_ok_and(|value| unsafe { CFEqual(value.0, window) != 0 });
         println!("AXRaise accepted: yes; app frontmost accepted: {}; app hidden restored: {}; minimized restored: {}; focused-window verified: {}. This does not prove key input or Space transition.", frontmost_accepted, app_hidden, restored, focus_verified);
         Ok(())
+    }
+
+    fn focused_index(list: &WindowList, count: usize) -> Option<usize> {
+        let attribute = cf_string(c"AXFocusedWindow").ok()?;
+        let focused = copy_attribute(list.app.0, attribute.0, "AXFocusedWindow").ok()?;
+        (0..count).find(|index| {
+            window_at(list, *index)
+                .is_ok_and(|window| unsafe { CFEqual(focused.0, window) != 0 })
+        })
     }
 
     unsafe fn set_false_if_true(element: CFTypeRef, name: &std::ffi::CStr) -> Result<bool, String> {
@@ -495,6 +508,28 @@ mod macos {
         Ok(())
     }
 
+    fn decode_event(kind: CGEventType, event: CGEventRef) -> crate::input::Event {
+        if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT
+            || kind == K_CG_EVENT_TAP_DISABLED_BY_USER
+        {
+            crate::input::Event::Disabled
+        } else if event.is_null() {
+            crate::input::Event::Other
+        } else if kind == K_CG_EVENT_KEY_DOWN {
+            let key = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
+            let flags = unsafe { CGEventGetFlags(event) };
+            let repeat = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT) } != 0;
+            crate::input::Event::KeyDown { key, flags, repeat }
+        } else if kind == K_CG_EVENT_KEY_UP {
+            let key = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
+            crate::input::Event::KeyUp { key }
+        } else if kind == K_CG_EVENT_FLAGS_CHANGED {
+            crate::input::Event::FlagsChanged { flags: unsafe { CGEventGetFlags(event) } }
+        } else {
+            crate::input::Event::Other
+        }
+    }
+
     extern "C" fn capture_event(
         _proxy: CGEventTapProxy,
         kind: CGEventType,
@@ -505,31 +540,7 @@ mod macos {
             return event;
         }
         let state = unsafe { &mut *user_info.cast::<crate::input::CaptureState>() };
-        let input = if kind == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT
-            || kind == K_CG_EVENT_TAP_DISABLED_BY_USER
-        {
-            crate::input::Event::Disabled
-        } else if event.is_null() {
-            crate::input::Event::Other
-        } else if kind == K_CG_EVENT_KEY_DOWN {
-            let key =
-                unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
-            let flags = unsafe { CGEventGetFlags(event) };
-            let repeat =
-                unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT) } != 0;
-            crate::input::Event::KeyDown { key, flags, repeat }
-        } else if kind == K_CG_EVENT_KEY_UP {
-            let key =
-                unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u16;
-            crate::input::Event::KeyUp { key }
-        } else if kind == K_CG_EVENT_FLAGS_CHANGED {
-            crate::input::Event::FlagsChanged {
-                flags: unsafe { CGEventGetFlags(event) },
-            }
-        } else {
-            crate::input::Event::Other
-        };
-        let output = state.handle(input);
+        let output = state.handle(decode_event(kind, event));
         if output.suppress {
             ptr::null_mut()
         } else {
@@ -586,6 +597,127 @@ mod macos {
         }
         Ok(())
     }
+
+    struct SwitchContext {
+        input: crate::input::CaptureState,
+        selection: crate::input::Selection,
+        deadline: std::time::Instant,
+    }
+
+    extern "C" fn switch_event(
+        _proxy: CGEventTapProxy,
+        kind: CGEventType,
+        event: CGEventRef,
+        user_info: *mut c_void,
+    ) -> CGEventRef {
+        if user_info.is_null() { return event; }
+        let context = unsafe { &mut *user_info.cast::<SwitchContext>() };
+        let decoded = decode_event(kind, event);
+        let output = if decoded == crate::input::Event::Disabled {
+            let output = context.input.handle(decoded);
+            context.selection.disable();
+            output
+        } else if std::time::Instant::now() >= context.deadline
+            && (!context.selection.terminal() || context.input.has_owned_keys())
+        {
+            context.selection.cancel();
+            context.input.handle_owned_tail(decoded)
+        } else if context.selection.terminal() {
+            context.input.handle_owned_tail(decoded)
+        } else {
+            let output = context.input.handle(decoded);
+            if let Some(direction) = output.step { context.selection.step(direction); }
+            if let Some(end) = output.end { context.selection.finish(end); }
+            output
+        };
+        if output.suppress { ptr::null_mut() } else { event }
+    }
+
+    pub fn switch(pid: i32, seconds: f64) -> Result<(), String> {
+        let list = window_list(pid)?;
+        let count = usize::try_from(unsafe { CFArrayGetCount(list.windows.0) })
+            .map_err(|_| "AXWindows returned a negative count")?;
+        if count == 0 { return Err(format!("PID {pid} has no AX windows to switch to")); }
+        let focused = focused_index(&list, count);
+        let mut titles = Vec::with_capacity(count);
+        for index in 0..count {
+            let window = window_at(&list, index)?;
+            let timeout = unsafe { AXUIElementSetMessagingTimeout(window, 1.0) };
+            if timeout != K_AX_ERROR_SUCCESS {
+                return Err(format!("Could not set AX timeout for window {index} (AXError {timeout})"));
+            }
+            titles.push(title(window));
+        }
+        println!("Frozen AX window list for PID {pid} (indexes can change after AX operations):");
+        for (index, title) in titles.iter().enumerate() { println!("{index}: {title:?}"); }
+        if let Some(index) = focused {
+            println!("Initial focus is window {index}; first Tab selects the next window.");
+        } else {
+            println!("Initial focus was unavailable in this AX list; first forward Tab selects 0 and first reverse Tab selects the last window.");
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
+        let mut context = SwitchContext {
+            input: crate::input::CaptureState::default(),
+            selection: crate::input::Selection::new(count, focused).unwrap(),
+            deadline,
+        };
+        let mask = (1_u64 << K_CG_EVENT_KEY_DOWN)
+            | (1_u64 << K_CG_EVENT_KEY_UP)
+            | (1_u64 << K_CG_EVENT_FLAGS_CHANGED);
+        let tap = unsafe {
+            CGEventTapCreate(
+                K_CG_SESSION_EVENT_TAP,
+                K_CG_HEAD_INSERT_EVENT_TAP,
+                0,
+                mask,
+                switch_event,
+                (&mut context as *mut SwitchContext).cast(),
+            )
+        };
+        if tap.is_null() {
+            return Err("Could not create active event tap; check Input Monitoring permission and event-tap requirements.".into());
+        }
+        let source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), tap, 0) };
+        if source.is_null() {
+            unsafe { CFRelease(tap) };
+            return Err("Could not create switch event tap run-loop source".into());
+        }
+        unsafe {
+            let current = CFRunLoopGetCurrent();
+            let mode = kCFRunLoopDefaultMode;
+            CFRunLoopAddSource(current, source, mode);
+            CGEventTapEnable(tap, true);
+            while !context.selection.terminal() || context.input.has_owned_keys() {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    context.selection.cancel();
+                    break;
+                }
+                CFRunLoopRunInMode(mode, remaining.as_secs_f64().min(0.1), false);
+            }
+            CGEventTapEnable(tap, false);
+            CFRunLoopRemoveSource(current, source, mode);
+            CFMachPortInvalidate(tap);
+            CFRelease(source);
+            CFRelease(tap);
+        }
+        if std::time::Instant::now() >= deadline {
+            context.selection.cancel();
+        }
+        let selected = context.selection.take_commit();
+        let disabled = context.input.end == Some(crate::input::End::Disabled);
+        drop(context);
+        if disabled {
+            return Err("The switch event tap was disabled; the selected window was not raised.".into());
+        }
+        if let Some(index) = selected {
+            println!("Committing frozen window {index}: {:?}", titles[index]);
+            raise_from_list(&list, index)?;
+        } else {
+            println!("Switch cancelled or expired; no window was raised.");
+        }
+        Ok(())
+    }
 }
 
 fn parse_seconds(raw: &str) -> Result<f64, String> {
@@ -615,6 +747,7 @@ fn run() -> Result<(), String> {
             Capture(f64),
             ListWindows(i32),
             RaiseWindow(i32, usize),
+            SwitchPid(i32, f64),
         }
         let command = match args.as_slice() {
             [] => Command::Status,
@@ -638,14 +771,19 @@ fn run() -> Result<(), String> {
                 let index: usize = index.parse().map_err(|_| "window index must be a non-negative integer")?;
                 Command::RaiseWindow(pid, index)
             }
-            _ => return Err("Usage: wintab-rs [--pid PID | --list-windows PID | --raise-window PID INDEX | --tap-seconds SECONDS | --capture-seconds SECONDS]".into()),
+            [flag, pid, seconds_flag, duration] if flag == "--switch-pid" && seconds_flag == "--seconds" => {
+                let pid: i32 = pid.parse().map_err(|_| "PID must be a positive integer")?;
+                if pid <= 0 { return Err("PID must be a positive integer".into()); }
+                Command::SwitchPid(pid, parse_seconds(duration)?)
+            }
+            _ => return Err("Usage: wintab-rs [--pid PID | --list-windows PID | --raise-window PID INDEX | --tap-seconds SECONDS | --capture-seconds SECONDS | --switch-pid PID --seconds N]".into()),
         };
         let (ax, input_monitoring) = macos::startup_permissions()?;
         match command {
             Command::Status => {
                 println!("wintab-rs phase 1 diagnostic PoC");
                 println!(
-                    "Use --list-windows PID to list AX windows, --raise-window PID INDEX to test public AX raise/focus APIs, --tap-seconds N for listen-only input, or --capture-seconds N for bounded Command+Tab suppression diagnostics (no window switching)."
+                    "Use --list-windows PID to list AX windows, --raise-window PID INDEX to test public AX raise/focus APIs, --tap-seconds N for listen-only input, --capture-seconds N for bounded suppression diagnostics, or --switch-pid PID --seconds N for a one-session switch."
                 );
                 Ok(())
             }
@@ -684,6 +822,13 @@ fn run() -> Result<(), String> {
                     return Ok(());
                 }
                 macos::raise_window(pid, index)
+            }
+            Command::SwitchPid(pid, seconds) => {
+                if !ax || !input_monitoring {
+                    return Ok(());
+                }
+                eprintln!("One-session window switch for at most {seconds:.1}s. Escape cancels; timeout restores normal input. The AX window list is frozen for this session.");
+                macos::switch(pid, seconds)
             }
         }
     }
