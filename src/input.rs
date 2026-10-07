@@ -20,6 +20,16 @@ pub enum Direction {
     Reverse,
 }
 
+pub fn candidate_owner_pids(entries: &[(i32, i32)], self_pid: i32) -> Vec<i32> {
+    let mut owners = Vec::new();
+    for &(pid, layer) in entries {
+        if pid > 0 && pid != self_pid && layer == 0 && !owners.contains(&pid) {
+            owners.push(pid);
+        }
+    }
+    owners
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Output {
     pub suppress: bool,
@@ -382,5 +392,13 @@ mod tests {
         let modified = state.handle(down(48, CMD | OPTION, false));
         assert!(!modified.suppress);
         assert_eq!(modified.end, Some(End::Cancel));
+    }
+
+    #[test]
+    fn candidate_owner_dedup_keeps_first_front_to_back_order_and_exclusions() {
+        let visible = [(40, 0), (41, 1), (42, 0), (40, 0), (-1, 0), (0, 0), (1, 0)];
+        let all = [(40, 0), (43, 0), (42, 0)];
+        let entries: Vec<_> = visible.into_iter().chain(all).collect();
+        assert_eq!(candidate_owner_pids(&entries, 1), vec![40, 42, 43]);
     }
 }

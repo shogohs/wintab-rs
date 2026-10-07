@@ -20,6 +20,7 @@ mod macos {
     type CFRunLoopSourceRef = *mut c_void;
     type CFRunLoopRef = *mut c_void;
     type CFDictionaryRef = *const c_void;
+    type CFArrayRef = *const c_void;
 
     const K_CFSTRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const K_AX_ERROR_SUCCESS: AXError = 0;
@@ -34,6 +35,9 @@ mod macos {
     const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 1 << 20;
     const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
     const K_CG_KEYBOARD_EVENT_AUTOREPEAT: u32 = 8;
+    const K_CG_WINDOW_LIST_OPTION_EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
+    const K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1 << 0;
+    const K_CFNUMBER_SINT32_TYPE: CFIndex = 3;
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         fn AXIsProcessTrusted() -> u8;
@@ -42,6 +46,7 @@ mod macos {
         fn CGPreflightListenEventAccess() -> bool;
         fn CGRequestListenEventAccess() -> bool;
         fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
+        fn AXUIElementCreateSystemWide() -> CFTypeRef;
         fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout: f32) -> AXError;
         fn AXUIElementCopyAttributeValue(
             element: CFTypeRef,
@@ -78,6 +83,14 @@ mod macos {
         ) -> CFMachPortRef;
     }
 
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGWindowListCopyWindowInfo(options: u32, relative_to_window: u32) -> CFArrayRef;
+        static kCGWindowOwnerPID: CFStringRef;
+        static kCGWindowLayer: CFStringRef;
+        static kCGWindowOwnerName: CFStringRef;
+    }
+
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
         fn CFDictionaryCreate(
@@ -99,6 +112,8 @@ mod macos {
         fn CFArrayGetTypeID() -> usize;
         fn CFArrayGetCount(array: CFTypeRef) -> CFIndex;
         fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex) -> CFTypeRef;
+        fn CFDictionaryGetTypeID() -> usize;
+        fn CFDictionaryGetValue(dictionary: CFDictionaryRef, key: CFTypeRef) -> CFTypeRef;
         fn CFStringGetTypeID() -> usize;
         fn CFStringGetCString(
             value: CFStringRef,
@@ -108,6 +123,8 @@ mod macos {
         ) -> u8;
         fn CFBooleanGetTypeID() -> usize;
         fn CFBooleanGetValue(value: CFTypeRef) -> u8;
+        fn CFNumberGetTypeID() -> usize;
+        fn CFNumberGetValue(number: CFTypeRef, number_type: CFIndex, value: *mut c_void) -> u8;
         fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> u8;
         fn CFRelease(value: CFTypeRef);
         fn CFMachPortCreateRunLoopSource(
@@ -224,6 +241,169 @@ mod macos {
         windows: OwnedCf,
     }
 
+    struct CandidateRow {
+        owner: usize,
+        window: usize,
+        pid: i32,
+        app_name: String,
+        title: String,
+    }
+
+    struct CandidateSnapshot {
+        owners: Vec<WindowList>,
+        rows: Vec<CandidateRow>,
+    }
+
+    fn string_value(value: CFTypeRef) -> Option<String> {
+        if value.is_null() || unsafe { CFGetTypeID(value) } != unsafe { CFStringGetTypeID() } {
+            return None;
+        }
+        let mut buffer = [0i8; 2048];
+        if unsafe {
+            CFStringGetCString(
+                value,
+                buffer.as_mut_ptr(),
+                buffer.len() as CFIndex,
+                K_CFSTRING_ENCODING_UTF8,
+            )
+        } == 0
+        {
+            return None;
+        }
+        Some(unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().into_owned())
+    }
+
+    fn dictionary_value(dictionary: CFTypeRef, key: CFTypeRef) -> Option<CFTypeRef> {
+        if dictionary.is_null()
+            || unsafe { CFGetTypeID(dictionary) } != unsafe { CFDictionaryGetTypeID() }
+        {
+            return None;
+        }
+        let value = unsafe { CFDictionaryGetValue(dictionary, key) };
+        (!value.is_null()).then_some(value)
+    }
+
+    fn number_i32(value: CFTypeRef) -> Option<i32> {
+        if value.is_null() || unsafe { CFGetTypeID(value) } != unsafe { CFNumberGetTypeID() } {
+            return None;
+        }
+        let mut result = 0i32;
+        let ok = unsafe {
+            CFNumberGetValue(value, K_CFNUMBER_SINT32_TYPE, (&mut result as *mut i32).cast())
+        };
+        (ok != 0).then_some(result)
+    }
+
+    type OwnerRecord = (i32, i32, Option<String>);
+
+    fn cg_owner_records(
+        options: u32,
+        keys: (CFStringRef, CFStringRef, CFStringRef),
+    ) -> Result<(Vec<OwnerRecord>, usize), String> {
+        let info = unsafe { CGWindowListCopyWindowInfo(options, 0) };
+        if info.is_null() { return Err("CGWindowListCopyWindowInfo returned null".into()); }
+        let info = OwnedCf(info);
+        if unsafe { CFGetTypeID(info.0) } != unsafe { CFArrayGetTypeID() } {
+            return Err("CGWindowListCopyWindowInfo did not return an array".into());
+        }
+        let count = usize::try_from(unsafe { CFArrayGetCount(info.0) })
+            .map_err(|_| "CGWindowListCopyWindowInfo returned a negative count")?;
+        let mut records = Vec::with_capacity(count);
+        let mut bad = 0;
+        for index in 0..count {
+            let row = unsafe { CFArrayGetValueAtIndex(info.0, index as CFIndex) };
+            let pid = dictionary_value(row, keys.0).and_then(number_i32);
+            let layer = dictionary_value(row, keys.1).and_then(number_i32);
+            let (Some(pid), Some(layer)) = (pid, layer) else { bad += 1; continue; };
+            let name = dictionary_value(row, keys.2).and_then(string_value);
+            records.push((pid, layer, name));
+        }
+        Ok((records, bad))
+    }
+
+    fn candidate_snapshot() -> Result<CandidateSnapshot, String> {
+        let exclude = K_CG_WINDOW_LIST_OPTION_EXCLUDE_DESKTOP_ELEMENTS;
+        let keys = unsafe { (kCGWindowOwnerPID, kCGWindowLayer, kCGWindowOwnerName) };
+        let (visible, bad_visible) = cg_owner_records(K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY | exclude, keys)?;
+        let (all, bad_all) = cg_owner_records(exclude, keys)?;
+        let mut raw: Vec<(i32, i32)> = visible.iter().map(|(pid, layer, _)| (*pid, *layer)).collect();
+        raw.extend(all.iter().map(|(pid, layer, _)| (*pid, *layer)));
+        let mut names = Vec::<(i32, String)>::new();
+        for (pid, _, name) in visible.iter().chain(all.iter()) {
+            if let Some(name) = name {
+                if !names.iter().any(|entry| entry.0 == *pid) { names.push((*pid, name.clone())); }
+            }
+        }
+        let self_pid = std::process::id() as i32;
+        let pids = crate::input::candidate_owner_pids(&raw, self_pid);
+        let invalid = raw.iter().filter(|entry| entry.0 <= 0).count();
+        let self_windows = raw.iter().filter(|entry| entry.0 == self_pid).count();
+        let layered = raw.iter().filter(|entry| entry.0 > 0 && entry.0 != self_pid && entry.1 != 0).count();
+        let mut seen = Vec::new();
+        let duplicates = raw.iter().filter(|entry| {
+            let (pid, layer) = **entry;
+            pid > 0 && pid != self_pid && layer == 0 && {
+                let duplicate = seen.contains(&pid);
+                if !duplicate { seen.push(pid); }
+                duplicate
+            }
+        }).count();
+        if bad_visible + bad_all > 0 { eprintln!("Skipped {} CG window rows with invalid dictionary/PID/layer metadata.", bad_visible + bad_all); }
+        println!("CG owner rows: visible {}, all {}, invalid metadata {}; excluded invalid PID: {invalid}, self: {self_windows}, nonzero layer: {layered}, duplicate owners: {duplicates}; unique candidate PIDs: {}.", visible.len(), all.len(), bad_visible + bad_all, pids.len());
+        println!("Visible owner order groups apps front-to-back; the supplemental all-windows order is unspecified. Neither order is per-window AX z-order or MRU. CGWindowList can omit apps and Spaces; candidate completeness across apps/Spaces is unverified.");
+
+        let mut owners = Vec::new();
+        let mut rows = Vec::new();
+        for pid in pids {
+            let app_name = names.iter().find(|(known, _)| *known == pid)
+                .map(|(_, name)| name.clone()).unwrap_or_else(|| format!("PID {pid}"));
+            let list = match window_list(pid) {
+                Ok(list) => list,
+                Err(error) => {
+                    eprintln!("Skipped candidate {app_name:?} (PID {pid}): AX enumeration failed: {error}");
+                    continue;
+                }
+            };
+            let owner = owners.len();
+            let count = match usize::try_from(unsafe { CFArrayGetCount(list.windows.0) }) {
+                Ok(count) => count,
+                Err(_) => {
+                    eprintln!("Skipped candidate {app_name:?} (PID {pid}): AXWindows returned a negative count.");
+                    continue;
+                }
+            };
+            let (mut invalid_element, mut role_skip, mut subrole_skip, mut modal_skip, mut modal_unreadable, mut read_skip) = (0, 0, 0, 0, 0, 0);
+            for window_index in 0..count {
+                let window = match window_at(&list, window_index) {
+                    Ok(window) => window,
+                    Err(_) => { invalid_element += 1; continue; }
+                };
+                let timeout = unsafe { AXUIElementSetMessagingTimeout(window, 1.0) };
+                if timeout != K_AX_ERROR_SUCCESS { read_skip += 1; continue; }
+                let role = match read_string_attribute(window, c"AXRole") {
+                    Ok(role) => role,
+                    Err(_) => { read_skip += 1; continue; }
+                };
+                if role != "AXWindow" { role_skip += 1; continue; }
+                let subrole = match read_string_attribute(window, c"AXSubrole") {
+                    Ok(subrole) => subrole,
+                    Err(_) => { read_skip += 1; continue; }
+                };
+                if subrole != "AXStandardWindow" { subrole_skip += 1; continue; }
+                match read_boolean_attribute(window, c"AXModal") {
+                    Ok(false) => {}
+                    Ok(true) => { modal_skip += 1; continue; }
+                    Err(_) => { modal_unreadable += 1; continue; }
+                }
+                rows.push(CandidateRow { owner, window: window_index, pid, app_name: app_name.clone(), title: title(window) });
+            }
+            println!("{app_name:?} PID {pid}: {} standard windows; skipped invalid elements {invalid_element}, role {role_skip}, subrole {subrole_skip}, modal {modal_skip}, unreadable/unsupported AXModal {modal_unreadable}, other unreadable {read_skip}.", rows.iter().filter(|row| row.owner == owner).count());
+            owners.push(list);
+        }
+        println!("Accepted AX candidates: {}", rows.len());
+        Ok(CandidateSnapshot { owners, rows })
+    }
+
     fn window_list(pid: i32) -> Result<WindowList, String> {
         let element = unsafe { AXUIElementCreateApplication(pid) };
         if element.is_null() {
@@ -276,6 +456,21 @@ mod macos {
             return Err(format!("{name} returned no value"));
         }
         Ok(OwnedCf(value))
+    }
+
+    fn read_string_attribute(element: CFTypeRef, name: &std::ffi::CStr) -> Result<String, String> {
+        let attribute = cf_string(name)?;
+        let value = copy_attribute(element, attribute.0, name.to_str().unwrap_or("attribute"))?;
+        string_value(value.0).ok_or_else(|| format!("{name:?} was not a bounded UTF-8 string"))
+    }
+
+    fn read_boolean_attribute(element: CFTypeRef, name: &std::ffi::CStr) -> Result<bool, String> {
+        let attribute = cf_string(name)?;
+        let value = copy_attribute(element, attribute.0, name.to_str().unwrap_or("attribute"))?;
+        if unsafe { CFGetTypeID(value.0) } != unsafe { CFBooleanGetTypeID() } {
+            return Err(format!("{name:?} did not return a Boolean"));
+        }
+        Ok(unsafe { CFBooleanGetValue(value.0) } != 0)
     }
 
     fn window_at(list: &WindowList, index: usize) -> Result<CFTypeRef, String> {
@@ -645,7 +840,43 @@ mod macos {
         }
     }
 
-    pub fn switch(pid: i32, seconds: f64) -> Result<(), String> {
+    fn focused_candidate(snapshot: &CandidateSnapshot) -> Option<usize> {
+        let system = unsafe { AXUIElementCreateSystemWide() };
+        if system.is_null() { return None; }
+        let system = OwnedCf(system);
+        if unsafe { AXUIElementSetMessagingTimeout(system.0, 1.0) } != K_AX_ERROR_SUCCESS {
+            return None;
+        }
+        let app_attr = cf_string(c"AXFocusedApplication").ok()?;
+        let app = copy_attribute(system.0, app_attr.0, "AXFocusedApplication").ok()?;
+        if unsafe { CFGetTypeID(app.0) } != unsafe { AXUIElementGetTypeID() } { return None; }
+        if unsafe { AXUIElementSetMessagingTimeout(app.0, 1.0) } != K_AX_ERROR_SUCCESS {
+            return None;
+        }
+        let window_attr = cf_string(c"AXFocusedWindow").ok()?;
+        let focused = copy_attribute(app.0, window_attr.0, "AXFocusedWindow").ok()?;
+        if unsafe { CFGetTypeID(focused.0) } != unsafe { AXUIElementGetTypeID() } { return None; }
+        snapshot.rows.iter().position(|row| {
+            window_at(&snapshot.owners[row.owner], row.window)
+                .is_ok_and(|window| unsafe { CFEqual(focused.0, window) != 0 })
+        })
+    }
+
+    pub fn list_candidates() -> Result<(), String> {
+        let snapshot = candidate_snapshot()?;
+        for (index, row) in snapshot.rows.iter().enumerate() {
+            println!("{index}: {:?} — {:?} (PID {})", row.app_name, row.title, row.pid);
+        }
+        Ok(())
+    }
+
+    pub fn switch_global(seconds: f64) -> Result<(), String> {
+        let snapshot = candidate_snapshot()?;
+        let focused = focused_candidate(&snapshot);
+        run_switch(snapshot, focused, seconds)
+    }
+
+    pub fn switch_pid(pid: i32, seconds: f64) -> Result<(), String> {
         let list = window_list(pid)?;
         let count = usize::try_from(unsafe { CFArrayGetCount(list.windows.0) })
             .map_err(|_| "AXWindows returned a negative count")?;
@@ -653,7 +884,7 @@ mod macos {
             return Err(format!("PID {pid} has no AX windows to switch to"));
         }
         let focused = focused_index(&list, count);
-        let mut titles = Vec::with_capacity(count);
+        let mut rows = Vec::with_capacity(count);
         for index in 0..count {
             let window = window_at(&list, index)?;
             let timeout = unsafe { AXUIElementSetMessagingTimeout(window, 1.0) };
@@ -662,11 +893,23 @@ mod macos {
                     "Could not set AX timeout for window {index} (AXError {timeout})"
                 ));
             }
-            titles.push(title(window));
+            rows.push(CandidateRow {
+                owner: 0,
+                window: index,
+                pid,
+                app_name: format!("PID {pid}"),
+                title: title(window),
+            });
         }
-        println!("Frozen AX window list for PID {pid} (indexes can change after AX operations):");
-        for (index, title) in titles.iter().enumerate() {
-            println!("{index}: {title:?}");
+        run_switch(CandidateSnapshot { owners: vec![list], rows }, focused, seconds)
+    }
+
+    fn run_switch(snapshot: CandidateSnapshot, focused: Option<usize>, seconds: f64) -> Result<(), String> {
+        let count = snapshot.rows.len();
+        if count == 0 { return Err("No supported AX standard windows were found; no event tap was installed".into()); }
+        println!("Frozen AX candidate list (indexes can change after AX operations):");
+        for (index, row) in snapshot.rows.iter().enumerate() {
+            println!("{index}: {:?} — {:?} (PID {})", row.app_name, row.title, row.pid);
         }
         if let Some(index) = focused {
             println!("Initial focus is window {index}; first Tab selects the next window.");
@@ -731,8 +974,9 @@ mod macos {
             );
         }
         if let Some(index) = selected {
-            println!("Committing frozen window {index}: {:?}", titles[index]);
-            raise_from_list(&list, index)?;
+            let row = &snapshot.rows[index];
+            println!("Committing frozen candidate {index}: {:?} — {:?} (PID {})", row.app_name, row.title, row.pid);
+            raise_from_list(&snapshot.owners[row.owner], row.window)?;
         } else {
             println!("Switch cancelled or expired; no window was raised.");
         }
@@ -768,6 +1012,8 @@ fn run() -> Result<(), String> {
             ListWindows(i32),
             RaiseWindow(i32, usize),
             SwitchPid(i32, f64),
+            ListCandidates,
+            Switch(f64),
         }
         let command = match args.as_slice() {
             [] => Command::Status,
@@ -796,14 +1042,18 @@ fn run() -> Result<(), String> {
                 if pid <= 0 { return Err("PID must be a positive integer".into()); }
                 Command::SwitchPid(pid, parse_seconds(duration)?)
             }
-            _ => return Err("Usage: wintab-rs [--pid PID | --list-windows PID | --raise-window PID INDEX | --tap-seconds SECONDS | --capture-seconds SECONDS | --switch-pid PID --seconds N]".into()),
+            [flag] if flag == "--list-candidates" => Command::ListCandidates,
+            [flag, seconds_flag, duration] if flag == "--switch" && seconds_flag == "--seconds" => {
+                Command::Switch(parse_seconds(duration)?)
+            }
+            _ => return Err("Usage: wintab-rs [--pid PID | --list-windows PID | --raise-window PID INDEX | --tap-seconds SECONDS | --capture-seconds SECONDS | --switch-pid PID --seconds N | --list-candidates | --switch --seconds N]".into()),
         };
         let (ax, input_monitoring) = macos::startup_permissions()?;
         match command {
             Command::Status => {
                 println!("wintab-rs phase 1 diagnostic PoC");
                 println!(
-                    "Use --list-windows PID to list AX windows, --raise-window PID INDEX to test public AX raise/focus APIs, --tap-seconds N for listen-only input, --capture-seconds N for bounded suppression diagnostics, or --switch-pid PID --seconds N for a one-session switch."
+                    "Use --list-windows PID / --raise-window PID INDEX for AX diagnostics, --list-candidates / --switch --seconds N for discovered windows, or --tap-seconds N / --capture-seconds N for input diagnostics."
                 );
                 Ok(())
             }
@@ -848,7 +1098,16 @@ fn run() -> Result<(), String> {
                     return Ok(());
                 }
                 eprintln!("One-session window switch for at most {seconds:.1}s. Escape cancels; timeout restores normal input. The AX window list is frozen for this session.");
-                macos::switch(pid, seconds)
+                macos::switch_pid(pid, seconds)
+            }
+            Command::ListCandidates => {
+                if !ax { return Ok(()); }
+                macos::list_candidates()
+            }
+            Command::Switch(seconds) => {
+                if !ax || !input_monitoring { return Ok(()); }
+                eprintln!("Candidate discovery uses Core Graphics owner metadata and Accessibility standard windows; it may omit apps or Spaces and does not provide MRU ordering.");
+                macos::switch_global(seconds)
             }
         }
     }

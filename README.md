@@ -20,6 +20,8 @@ GitHub Actionsの`macOS PoC` workflowは、Apple Silicon向けの`.app`を成果
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --list-windows 1234
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --raise-window 1234 0
 "/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --switch-pid 1234 --seconds 10
+"/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --list-candidates
+"/path/to/wintab-rs.app/Contents/MacOS/wintab-rs" --switch --seconds 10
 ```
 
 有効な引数で起動すると、未許可のAccessibility権限を`AXIsProcessTrustedWithOptions`（`kAXTrustedCheckOptionPrompt = true`）、入力監視権限を`CGRequestListenEventAccess`で要求し、現在のプロセスに対する許可状態を表示します。Accessibilityの要求は非同期なので、要求直後の未許可表示は拒否の確定ではありません。このCLIは権限設定を待って常駐せず、実行に必要な権限がまだなければ診断を開始せずに案内を表示し、正常終了します。[Apple: Accessibility権限要求](https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions)、[入力監視権限要求](https://developer.apple.com/documentation/coregraphics/cgrequestlisteneventaccess())
@@ -36,4 +38,8 @@ GitHub Actionsの`macOS PoC` workflowは、Apple Silicon向けの`.app`を成果
 
 Escapeは元のウィンドウを操作せず終了します。選択中に別の通常キーを押した場合も取消し、そのキーは元のアプリへ通します。抑止したTab／Escapeの解放まで対応づけて処理し、解放を待つ間に期限へ達した場合は確定済みでもraiseしません。期限切れ・タップ無効化でもraiseせず終了し、閉じた候補を別のウィンドウで代用しません。次の切り替えを試すにはコマンドを再実行します。全アプリの候補取得、MRU、UI、常駐機能、全Space対応を完成させたモードではありません。
 
-権限、AXウィンドウ取得、listen-onlyでのCommand+Tab検出は既存のActions成果物を実機で確認しました。captureの正方向・commitカウント、およびChromeの2ウィンドウへのAXRaise・前面化・FocusedWindow属性の一致も確認されています。capture終了後の標準Command+Tab復帰、raise後の実入力先やSpace遷移は未確認です。今回追加した単一PIDの切り替えモードも実機検証前で、要件全体は未完成です。
+`--list-candidates`はPID指定なしで候補を取得します。CGの画面上の一覧から前面順にowner PIDを取り出し、全ウィンドウ一覧にだけ現れるPIDを補完して、それぞれのAX標準ウィンドウをまとめます。アプリ群は画面上のowner順優先、同じアプリ内はAX配列順で、正確なMRUやウィンドウ単位のCG前面順ではありません。optionAllの戻り順も前面順とは保証されません。CGとAXの個別ウィンドウをタイトルや位置で対応づける処理は行いません。
+
+`--switch --seconds N`はその保持済み候補で、単一PIDモードと同じ1セッションの切り替えを行います。取得失敗・非対応・除外の件数と理由を診断に表示します。`AXModal=false`を確認できない標準ウィンドウも保守的に除外し、未対応・読み取り失敗のAXModal件数を別に表示します。CG一覧に現れないアプリやAX非対応による欠落、全Space・フルスクリーン・最小化・非表示の完全性は未確認です。画面収録権限を要求するモードではありません。
+
+権限、AXウィンドウ取得、listen-onlyでのCommand+Tab検出は既存のActions成果物を実機で確認しました。captureの正方向・commitカウント、Chromeの2ウィンドウへのAXRaise・前面化・FocusedWindow属性の一致、単一PIDの`--switch-pid`について動作OKの報告を受けています。個別の取消・期限境界・終了後の標準Command+Tab復帰やSpace遷移をすべて検証済みとは扱いません。今回のPID指定なしモードは実機検証前で、要件全体は未完成です。

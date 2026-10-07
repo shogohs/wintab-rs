@@ -94,6 +94,10 @@ AXの診断は対象PIDの公開`AXWindows`配列からウィンドウ要素を�
 
 イベントコールバックは既存の入力状態処理と選択位置の更新だけに限定する。commitを受けたrunloopはタップをdisable・detach・invalidateしてからAX操作を行い、同じrunloopでAX応答を待つ間に入力タップを動かさない。コールバックの後続イベントが最初の確定位置を変更できないよう、1セッションの終了を固定する。保持した配列はAX操作の終了まで解放しない。Lunaが実装・純粋状態テスト、Solがレビューを担当する。MRU、全アプリの候補取得、全Spaceの成立、UI・常駐化はこの単位の完了に含めない。
 
+単一PIDモードの動作OKというユーザー報告を受け、次は`--list-candidates`と`--switch --seconds N`でPIDを指定しない候補取得・切り替えを実装する。CGWindowListCopyWindowInfoの`optionOnScreenOnly | excludeDesktopElements`で得た前面から背面への並びからlayer 0のowner PIDを重複なく取り出し、`optionAll | excludeDesktopElements`にだけ現れるPIDを後ろへ追加する。optionAllの戻り順自体を前面順と扱わない。CGはPID発見とアプリ群の初期順だけに使い、各アプリ内の順序はそのPIDのAXWindows配列順とする。CGとAXの個別ウィンドウをタイトル・位置・サイズで対応づけない。[Apple: optionOnScreenOnly](https://developer.apple.com/documentation/coregraphics/cgwindowlistoption/optiononscreenonly)、[optionAll](https://developer.apple.com/documentation/coregraphics/cgwindowlistoption/optionall)
+
+自プロセスを除き、AXの標準ウィンドウ・非モーダルという条件を確認できた要素を候補にする。PIDごとの取得失敗と候補除外は件数・理由を診断に表示する。AXModalが非対応・読み取り失敗・不正型の場合も標準ウィンドウを除外する保守的な方針であり、その件数は別に表示してChrome等での欠落を確認する。候補は開始時に保持したAX要素で固定し、確定後の再取得や番号による再同定をしない。入力・取消・期限・タップ終了後のAX操作は既存の1セッション処理を共有する。これは画面上のowner順を優先したアプリ群＋AX配列の初期順であり、正確なMRUやウィンドウ単位のCG前面順ではない。CG一覧に現れないアプリ、AX非対応、別Space・フルスクリーン・最小化・非表示の欠落がないことは実機確認を待ち、全Space要件の成立済みとはしない。UIと常駐履歴は追加しない。
+
 - 待機、選択中、一時停止の小さな状態機械を実装する。
 - 正逆の循環、Command解放、取消、キーリピートと左右修飾キーを扱う。
 - MRU、選択中の候補順固定、消滅候補と失敗時の終了を実装する。
@@ -130,6 +134,8 @@ GitHub Actions上で`cargo fmt --check`、`cargo check`、`cargo test`を実行�
 
 単一PIDの切り替えでは、0件／1件／複数件、正逆方向の循環、FocusedWindowの有無、リピート無視、取消、最初のcommit位置の固定と終了後のイベント無視をCI用テストで確認する。実機ではChromeの2ウィンドウで保持順による移動と実入力先を確認し、Escape・期限切れ・候補の消滅・操作失敗の際に元の状態と標準Command+Tabが戻ることを調べる。別Space・フルスクリーン・最小化・非表示への対応は個別に記録し、既存のAX属性一致から推測しない。
 
+PID指定なしの候補取得では、画面上のowner PID順を維持した重複除去、optionAllからの補完、layer／自PID／不正PIDの除外を小さな純粋テストで確認する。Actions成果物でChromeと別アプリを跨ぐ選択、同一アプリ内の複数ウィンドウ、除外理由と候補数、取消・終了後の入力復帰を調べる。AX/CGの個別対応と正確なMRUはこの実装で検証済みとしない。
+
 ### 手動確認記録
 
 - 2026-10-07、Actions成果物を起動し、arm64のMach-O、Info.plist、ad-hoc署名を確認した。
@@ -142,7 +148,8 @@ GitHub Actions上で`cargo fmt --check`、`cargo check`、`cargo test`を実行�
 - 2026-10-07、`--pid <PID>`で対象アプリのAXウィンドウを1件取得。PIDは環境固有のため記録しない。
 - 2026-10-07、Chromeの2ウィンドウを`--list-windows`で列挙し、`--raise-window`でそれぞれを指定。両方でAXRaise・アプリ前面化が受け付けられ、FocusedWindow属性の一致を確認した。AXRaise後にAXWindows配列の順序が変わるため、コマンド間でordinal indexを再利用できない。切り替え実装では選択開始時の候補配列とAX要素を保持し、番号で再解決しない。
 - 2026-10-07、ユーザーからcaptureのforward・commitカウントが記録され、正常に動作していそうとの報告を受けた。終了後の標準Command+Tab復帰やraise後の実入力先を明示的に確認した報告ではないため、そこは未確認のままとする。
-- 単一PIDの切り替えモードによる選択・実入力先の確認は未実施。候補一覧UI、全アプリとMRUを含む通常利用の切り替え機能はまだ実装されていない。
+- 2026-10-07、ユーザーから`--switch-pid`の実機動作OKの報告を受けた。単一PIDの実動作確認として記録し、取消・期限境界・候補消滅・別Spaceなど個別ケースをすべて確認したとは扱わない。
+- PID指定なしの候補取得・切り替えは実機未確認。候補一覧UI、正確なMRUと全Spaceを含む通常利用の切り替え機能はまだ完成していない。
 
 ## 5. 追加判断が必要になる条件
 
