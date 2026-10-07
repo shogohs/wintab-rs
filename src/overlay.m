@@ -40,15 +40,20 @@ static NSUInteger wintab_panel_generation;
     CGFloat fontSize = MAX(10.0, height * 0.62);
     NSFont *font = [NSFont boldSystemFontOfSize:fontSize];
     NSString *text = self.badge;
-    NSMutableParagraphStyle *paragraph = [NSMutableParagraphStyle new];
-    paragraph.alignment = NSTextAlignmentCenter;
-    paragraph.lineBreakMode = NSLineBreakByClipping;
-    NSDictionary *attributes = @{ NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.whiteColor, NSParagraphStyleAttributeName: paragraph };
+    NSDictionary *attributes = @{ NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.whiteColor };
     CGFloat horizontalPadding = height * 0.375;
     CGFloat verticalPadding = height * 0.075;
     NSSize textSize = [text sizeWithAttributes:attributes];
-    BOOL fits = textSize.width + horizontalPadding * 2.0 <= maxWidth && textSize.height + verticalPadding * 2.0 <= height;
-    CGFloat width = MIN(maxWidth, textSize.width + horizontalPadding * 2.0);
+    BOOL singleCharacter = text.length == 1;
+    BOOL fits = textSize.height + verticalPadding * 2.0 <= height;
+    CGFloat width;
+    if (singleCharacter) {
+        width = height;
+        fits = fits && textSize.width <= height - verticalPadding * 2.0;
+    } else {
+        width = MIN(maxWidth, textSize.width + horizontalPadding * 2.0);
+        fits = fits && textSize.width + horizontalPadding * 2.0 <= maxWidth;
+    }
     NSRect badgeRect = NSMakeRect(NSMaxX(iconRect) - width, NSMaxY(iconRect) - height, width, height);
     [[NSColor colorWithRed:0.90 green:0.12 blue:0.16 alpha:1.0] setFill];
     if (fits) {
@@ -62,7 +67,7 @@ static NSUInteger wintab_panel_generation;
         [text drawAtPoint:textRect.origin withAttributes:attributes];
         [NSGraphicsContext restoreGraphicsState];
     } else {
-        CGFloat diameter = MIN(height * 0.45, MIN(iconRect.size.width, iconRect.size.height));
+        CGFloat diameter = height * 0.45;
         NSRect dotRect = NSMakeRect(NSMaxX(iconRect) - diameter, NSMaxY(iconRect) - diameter, diameter, diameter);
         [[NSBezierPath bezierPathWithOvalInRect:dotRect] fill];
     }
