@@ -338,7 +338,7 @@ mod tests {
         timed_out_pending_commit.finish(End::Commit);
         timed_out_pending_commit.cancel();
         assert_eq!(timed_out_pending_commit.take_commit(), None);
-        let timeout = Selection::new(2, None).unwrap();
+        let mut timeout = Selection::new(2, None).unwrap();
         assert_eq!(timeout.take_commit(), None);
     }
 
